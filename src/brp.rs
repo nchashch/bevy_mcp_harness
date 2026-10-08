@@ -709,6 +709,166 @@ pub struct LastServedCapture {
 /// snapshot is written once to a `.json` sidecar beside the PNG (`<capture>.json`) so the
 /// human-browsable record carries state too. The file is NOT consumed — captures persist for
 /// human review.
+/// Computes screenspace projections for all visible `Aabb` entities, relative to the given
+/// camera. Returns a list of `{entity, name, center, bounding_box, depth}` entries sorted by
+/// depth (nearest first), suitable for embedding in a screenshot response or a standalone
+/// `entities_on_screen` method.
+///
+/// The 2D bounding box is computed by projecting all 8 corners of the world-space AABB
+/// through the camera and taking the min/max. Entities behind the camera or with
+/// `InheritedVisibility = false` are excluded.
+pub(crate) fn entities_on_screen_data(
+    world: &mut World,
+    camera_entity: Entity,
+) -> BrpResult<Vec<serde_json::Value>> {
+    let camera = world
+        .get::<Camera>(camera_entity)
+        .ok_or_else(|| BrpError::internal("camera entity has no Camera component"))?
+        .clone();
+    let camera_transform = *world
+        .get::<GlobalTransform>(camera_entity)
+        .ok_or_else(|| BrpError::internal("camera entity has no GlobalTransform"))?;
+
+    let mut query = world.query_filtered::<(
+        Entity,
+        &bevy::camera::primitives::Aabb,
+        &GlobalTransform,
+        Option<&Name>,
+        Option<&InheritedVisibility>,
+        Option<&ViewVisibility>,
+    ), ()>();
+
+    let mut entries: Vec<(f32, serde_json::Value)> = Vec::new();
+    for (entity, aabb, _global_transform, name, inherited_vis, view_vis) in query.iter(world) {
+        if inherited_vis.is_some_and(|vis| !vis.get()) {
+            continue;
+        }
+        if view_vis.is_some_and(|vis| !vis.get()) {
+            continue;
+        }
+
+        // Project the AABB center to screenspace.
+        let Ok(center_2d) =
+            camera.world_to_viewport(&camera_transform, Vec3::from(aabb.center))
+        else {
+            continue;
+        };
+
+        // Project all 8 AABB corners to compute the 2D bounding box. An axis-aligned
+        // box viewed from any angle needs all 8 corners projected to get the exact 2D bbox.
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        let mut any_in_front = false;
+        for sx in [0.0, 1.0] {
+            for sy in [0.0, 1.0] {
+                for sz in [0.0, 1.0] {
+                    let corner = Vec3::new(
+                        aabb.center.x + aabb.half_extents.x * (sx * 2.0 - 1.0),
+                        aabb.center.y + aabb.half_extents.y * (sy * 2.0 - 1.0),
+                        aabb.center.z + aabb.half_extents.z * (sz * 2.0 - 1.0),
+                    );
+                    if let Ok(pos) = camera.world_to_viewport(&camera_transform, corner) {
+                        any_in_front = true;
+                        min_x = min_x.min(pos.x);
+                        min_y = min_y.min(pos.y);
+                        max_x = max_x.max(pos.x);
+                        max_y = max_y.max(pos.y);
+                    }
+                }
+            }
+        }
+        if !any_in_front {
+            continue;
+        }
+
+        // Depth: distance from camera to the AABB center.
+        let distance = camera_transform
+            .translation()
+            .distance(Vec3::from(aabb.center));
+
+        let mut entry = json!({
+            "entity": entity,
+            "center": [
+                center_2d.x.round() as i32,
+                center_2d.y.round() as i32,
+            ],
+            "bounding_box": [
+                min_x.round() as i32,
+                min_y.round() as i32,
+                (max_x - min_x).round() as i32,
+                (max_y - min_y).round() as i32,
+            ],
+            "depth": (distance * 100.0).round() / 100.0,
+        });
+        if let Some(name) = name {
+            entry["name"] = json!(name.to_string());
+        }
+        entries.push((distance, entry));
+    }
+
+    entries.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+}
+
+/// `{prefix}/entities_on_screen` — projects all visible `Aabb` entities through the capture
+/// camera into screenspace rects, sorted by depth (nearest first). Lets the agent correlate
+/// pixels on a screenshot to entity ids without OCR.
+pub(crate) fn entities_on_screen_method(params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
+    let camera_entity = params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("camera"))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
+        .map(bevy::ecs::entity::Entity::from_bits);
+
+    let camera_entity = match camera_entity {
+        Some(entity) => entity,
+        None => {
+            // Default: the highest-order active camera (the one the agent "sees through").
+            let mut best: Option<(Entity, isize)> = None;
+            let mut query = world.query_filtered::<(Entity, &Camera), ()>();
+            for (entity, camera) in query.iter(world) {
+                if camera.is_active && best.is_none_or(|(_, order)| camera.order > order) {
+                    best = Some((entity, camera.order));
+                }
+            }
+            best.map(|(entity, _)| entity).ok_or_else(|| {
+                BrpError::internal("no active camera found")
+            })?
+        }
+    };
+
+    let entities = entities_on_screen_data(world, camera_entity)?;
+    Ok(json!({
+        "camera_entity": camera_entity,
+        "entities": entities,
+    }))
+}
+
+/// Resolves the highest-order active Camera entity and projects all visible `Aabb` entities
+/// through it. Returns a JSON array (empty on error).
+fn screenshot_get_entities(world: &mut World) -> serde_json::Value {
+    let mut best: Option<(Entity, isize)> = None;
+    let mut query = world.query_filtered::<(Entity, &Camera), ()>();
+    for (entity, camera) in query.iter(world) {
+        if camera.is_active && best.is_none_or(|(_, order)| camera.order > order) {
+            best = Some((entity, camera.order));
+        }
+    }
+    let Some(camera_entity) = best.map(|(entity, _)| entity) else {
+        return json!([]);
+    };
+    match entities_on_screen_data(world, camera_entity) {
+        Ok(entries) => json!(entries),
+        Err(_) => json!([]),
+    }
+}
+
 pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
     let Some(dir) = screenshots_dir(world) else {
         return Err(BrpError::internal(
@@ -723,6 +883,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
         Err(_) => return Ok(json!({"ready": false})),
     };
     let state = game_state_snapshot(world);
+    let entities = screenshot_get_entities(world);
 
     // Unchanged-frame suppression: PNG bytes are a deterministic function of the frame
     // (same encoder, same pixels → same bytes), so hashing the file hashes the frame.
@@ -738,6 +899,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "unchanged": true,
             "path": path.display().to_string(),
             "state": state,
+            "entities": entities,
         }));
     }
     if let Some(mut last) = world.get_resource_mut::<LastServedCapture>() {
@@ -762,6 +924,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "png_base64": encoded,
             "path": path.display().to_string(),
             "state": state,
+            "entities": entities,
         }))
     }
 }

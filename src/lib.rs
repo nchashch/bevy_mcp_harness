@@ -537,6 +537,7 @@ impl Plugin for BevyMcpHarnessPlugin {
         let ui_method = app.register_system(brp::ui_dump_method);
         let client_info_method = app.register_system(brp::client_info_method);
         let cameras_method = app.register_system(brp::cameras_method);
+        let entities_on_screen_method = app.register_system(brp::entities_on_screen_method);
         let plan_check_method = app.register_system(brp::plan_check_method);
         let mut methods = app
             .world_mut()
@@ -555,6 +556,7 @@ impl Plugin for BevyMcpHarnessPlugin {
         methods.insert(format!("{prefix}/ui"), instant(ui_method));
         methods.insert(format!("{prefix}/client_info"), instant(client_info_method));
         methods.insert(format!("{prefix}/cameras"), instant(cameras_method));
+        methods.insert(format!("{prefix}/entities_on_screen"), instant(entities_on_screen_method));
         methods.insert(format!("{prefix}/plan_check"), instant(plan_check_method));
         // The one built-in with a meaningful declared precondition — a screenshot host that
         // can't render (or has no capture target) fails before the agent burns a poll cycle.
