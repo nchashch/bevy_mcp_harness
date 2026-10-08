@@ -20,6 +20,7 @@ categories = ["game-development", "development-tools::testing"]
 # `bevy_dev_tools` (and its render-pipeline deps) into host builds that enable it.
 [features]
 render_debug = ["dep:bevy_dev_tools", "bevy/bevy_dev_tools", "bevy/bevy_core_pipeline", "bevy/bevy_pbr"]
+physics_debug = ["dep:avian3d", "bevy/bevy_gizmos"]
 
 [dependencies]
 # `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`
@@ -57,6 +58,10 @@ schemars = "1.0"
 # Render-debug views (`render_debug` feature): `bevy_dev_tools`' overlay reads prepass/gbuffer
 # textures, so it needs the render-pipeline crates — none of which pull winit/wayland.
 bevy_dev_tools = { version = "0.19.1", optional = true }
+# Physics debug views (`physics_debug` feature): Avian3D's collider gizmos, rendered via
+# bevy_gizmos as part of the normal render pipeline. The version must match the host's
+# avian3d dependency.
+avian3d = { version = "0.7", optional = true }
 
 # Examples build against the full bevy feature set (the `--render` branch uses `DefaultPlugins`)
 # — dev-dependency features only affect examples/tests, never host builds of the lib.

@@ -450,6 +450,33 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .map(|target| Screenshot(bevy::camera::RenderTarget::Image(target.0.clone().into())))
         .unwrap_or_else(Screenshot::primary_window);
 
+    // `debug_view: "physics"` is a persistent toggle — Avian3D collider gizmos via
+    // bevy_gizmos. The gizmos stay on for subsequent captures (a logical view, not a
+    // one-shot visual overlay). Requires the `physics_debug` cargo feature.
+    #[cfg(feature = "physics_debug")]
+    if params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("debug_view"))
+        .and_then(serde_json::Value::as_str)
+        == Some("physics")
+    {
+        physics_debug::apply_physics_debug(world)?;
+        world
+            .spawn(capture_target)
+            .observe(save_encoded_to_disk(path.clone(), crop, max_dimension))
+            .observe(restore_camera_order);
+        return Ok(json!({
+            "status": "capturing",
+            "poll": "game/screenshot/get",
+            "path": path.display().to_string(),
+            "crop": crop,
+            "max_dimension": max_dimension,
+            "debug_view": "physics",
+            "note": "physics collider gizmos enabled — they stay on for subsequent captures",
+        }));
+    }
+
     // `debug_view: "wireframe"` is a separate mechanism (global `WireframeConfig` toggle in
     // bevy_pbr, not the bevy_dev_tools F1 overlay) — handled before the overlay modes.
     #[cfg(feature = "render_debug")]
@@ -1070,6 +1097,34 @@ pub(crate) mod render_debug {
             }
         }
         commands.remove_resource::<WireframeRestore>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Physics debug views — Avian3D collider gizmos via bevy_gizmos. The gizmos are drawn by
+// systems that run every frame in PostUpdate (gated by `PhysicsGizmos.enabled`), so once
+// enabled they appear in every subsequent capture without a warm-up race.
+#[cfg(feature = "physics_debug")]
+mod physics_debug {
+    use super::*;
+    
+
+    /// Ensures the `PhysicsDebugPlugin` is added and the `PhysicsGizmos` config has
+    /// collider rendering enabled. The gizmos are persistent — they stay on for subsequent
+    /// captures until explicitly disabled or the app exits. Returns the collider color used.
+    pub(crate) fn apply_physics_debug(world: &mut World) -> Result<Color, BrpError> {
+        let collider_color = Color::srgb(0.0, 1.0, 0.5);
+        // Toggle the PhysicsGizmos config group through GizmoConfigStore — the plugin's
+        // PostUpdate systems check `enabled` and `collider_color` to decide what to draw.
+        {
+            let mut store = world.resource_mut::<bevy::gizmos::config::GizmoConfigStore>();
+            let (gizmo_config, physics_config) =
+                store.config_mut::<avian3d::debug_render::PhysicsGizmos>();
+            gizmo_config.enabled = true;
+            physics_config.collider_color = Some(collider_color);
+            physics_config.aabb_color = Some(Color::srgba(1.0, 1.0, 0.0, 0.3));
+        }
+        Ok(collider_color)
     }
 }
 

@@ -514,6 +514,11 @@ impl Plugin for BevyMcpHarnessPlugin {
             if !app.is_plugin_added::<bevy::pbr::wireframe::WireframePlugin>() {
                 app.add_plugins(bevy::pbr::wireframe::WireframePlugin::default());
             }
+            // Physics debug views (`physics_debug` feature): Avian3D collider gizmos via
+            // bevy_gizmos. The plugin adds PostUpdate systems that draw colliders/AABBs/contacts
+            // when `PhysicsGizmos.enabled` is true; `debug_view: "physics"` toggles the config.
+            #[cfg(feature = "physics_debug")]
+            app.add_plugins(avian3d::debug_render::PhysicsDebugPlugin);
             app.add_systems(Update, brp::render_debug::runner);
             app.add_systems(Update, brp::render_debug::wireframe_runner);
         }
