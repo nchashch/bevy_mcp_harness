@@ -1,0 +1,29 @@
+[package]
+name = "bevy_mcp_harness"
+version = "0.1.0"
+edition = "2024"
+description = "Localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps"
+
+[dependencies]
+# `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`
+# variants by name through KeyCode's own serde impl.
+bevy = { version = "0.19.1", features = ["bevy_remote", "serialize"] }
+rmcp = { version = "3.5.1", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+base64 = "0.22"
+# Same 0.25 line bevy_render pulls transitively for screenshot encoding — declared so captures
+# can be cropped (`imageops::crop_imm`) and PNG-encoded here.
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+serde = "1"
+schemars = "1.0"
