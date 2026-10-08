@@ -13,7 +13,9 @@ The design history behind these changes lives in
 
 ### Changed
 
-- **Captures always save the full-resolution frame.** The file on disk is
+- **Captures always save the full-resolution frame** ([ADR
+  0011](docs/agents/adr/0011-always-full-res-captures-and-annotation-workflow.md)).
+  The file on disk is
   never cropped or downscaled: `crop` and `max_dimension` now shape only the
   *served view* (`png_base64` — the token-efficient image the agent looks at),
   applied at poll time to the full-res file. The report/human artifact is the

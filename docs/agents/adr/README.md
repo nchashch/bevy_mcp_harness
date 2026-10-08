@@ -34,5 +34,6 @@ everything learned from the first real host adoption (prototype_19 itself).
 | [0008](./0008-entity-to-pixel-correlation.md) | Entity-to-pixel correlation (`entities_on_screen`) | Accepted |
 | [0009](./0009-render-debug-views-on-screenshots.md) | Render-debug views on screenshots (`debug_view` parameter) | Accepted |
 | [0010](./0010-batched-debug-views.md) | Batched debug views in one tool call (`debug_views` parameter) | Accepted |
+| [0011](./0011-always-full-res-captures-and-annotation-workflow.md) | Always-persist full-resolution captures, and the annotation workflow | Accepted |
 
 New records should be added to this index in the same commit that adds the file.
