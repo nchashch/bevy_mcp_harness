@@ -115,7 +115,8 @@ pub(crate) fn game_state_method(_params: In<Option<serde_json::Value>>, world: &
 
 /// The `game/state` payload as a plain JSON value. Shared by the `game/state` method and
 /// [`screenshot_get_method`], which fuses it into every capture response (and writes it to a
-/// `.json` sidecar next to the PNG) — a screenshot arrives with its ground-truth state
+/// `.json` sidecar next to the PNG, together with the capture's `entities` projection table)
+/// — a screenshot arrives with its ground-truth state
 /// attached, so the agent never has to OCR the HUD or correlate "which call came after which
 /// action". Snapshot is taken at *poll* time, i.e. a few hundred ms after the capture started;
 /// that is the state the agent wants anyway (the world as it is right after its action), and
@@ -705,9 +706,11 @@ pub struct LastServedCapture {
 /// newest capture's pixels are identical to the last capture served in full, responds
 /// `{"ready": true, "unchanged": true, "path", "state"}` WITHOUT `png_base64` — the agent
 /// already has this exact image; the fresh `state` is still included since the world can
-/// change under a static view. The response embeds the `game/state` ground truth, and the same
-/// snapshot is written once to a `.json` sidecar beside the PNG (`<capture>.json`) so the
-/// human-browsable record carries state too. The file is NOT consumed — captures persist for
+/// change under a static view. The response embeds the `game/state` ground truth and the
+/// per-frame `entities` projection table; both are written once to a `.json` sidecar beside
+/// the PNG (`<capture>.json`) so the human-browsable record is a self-contained annotation
+/// source (the entity table can't be re-derived post-hoc — `entities_on_screen` projects the
+/// current frame, not the captured one). The file is NOT consumed — captures persist for
 /// human review.
 /// Computes screenspace projections for all visible `Aabb` entities, relative to the given
 /// camera. Returns a list of `{entity, name, center, bounding_box, depth}` entries sorted by
@@ -916,9 +919,14 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let sidecar = path.with_extension("json");
         if !sidecar.exists() {
+            // `entities` is included so the sidecar is a self-contained annotation source:
+            // the per-frame entity table lives only in the poll response otherwise, and a
+            // post-hoc annotator (a later session, a human, the report flow) can't re-derive
+            // it — `entities_on_screen` projects the *current* frame, not the captured one.
             let record = json!({
                 "screenshot": path.display().to_string(),
                 "state": state,
+                "entities": entities,
             });
             if let Ok(text) = serde_json::to_string_pretty(&record) {
                 let _ = std::fs::write(&sidecar, text);
