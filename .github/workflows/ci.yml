@@ -39,12 +39,10 @@ jobs:
           fi
           echo "lib graph clean: no winit/Wayland"
 
-      - name: Test (unit + doctests)
-        # cargo forbids mixing `--lib` with `--doc`, so run them as two invocations.
-        run: |
-          cargo test --lib
-          cargo test --doc
-
+      # No `cargo test` here: test targets compile WITH dev-dependencies, and the example's
+      # dev-dependency is full-featured Bevy (wayland/winit compile in) — this job has no
+      # system libraries. Tests run in the all-targets job; the guard above is this job's
+      # reason to exist.
       - name: Clippy (lib)
         run: cargo clippy --lib -- -D warnings
 
@@ -76,7 +74,10 @@ jobs:
         run: cargo build --all-targets
 
       - name: Test
-        run: cargo test
+        # Doctests can't ride `--all-targets` — separate invocation.
+        run: |
+          cargo test --all-targets
+          cargo test --doc
 
       - name: Clippy (all targets)
         run: cargo clippy --all-targets -- -D warnings
