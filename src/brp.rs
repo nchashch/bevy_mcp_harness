@@ -968,7 +968,7 @@ pub(crate) mod render_debug {
             "deferred_metallic_roughness" => RenderDebugMode::DeferredMetallicRoughness,
             "depth_pyramid" => RenderDebugMode::DepthPyramid { mip_level: 0 },
             other => {
-                return Err(BrpError::internal(&format!(
+                return Err(BrpError::internal(format!(
                     "unknown debug_view {other:?} (expected depth | normals | motion_vectors | \
                      deferred | deferred_base_color | deferred_emissive | \
                      deferred_metallic_roughness | depth_pyramid)"
@@ -1086,6 +1086,10 @@ pub(crate) mod render_debug {
     /// Runs every `Update`: applies the pending overlay on the first call, then spawns the
     /// capture a few frames later (once the overlay has been extracted and rendered); with
     /// no pending capture, nothing happens.
+    // `drop(pending)` releases the `Mut` borrow early (the field clones above end the
+    // resource-guard lifetime so later `world` calls compile) — `PendingDebugView` itself
+    // doesn't implement `Drop`, which clippy flags; the drop is deliberate borrow scoping.
+    #[allow(clippy::drop_non_drop)]
     pub(crate) fn runner(world: &mut World) {
         let Some(mut pending) = world.get_resource_mut::<PendingDebugView>() else {
             return;
@@ -1217,6 +1221,8 @@ pub(crate) mod render_debug {
 
     /// Runs every `Update`: spawns the capture after the wireframe pipeline has warmed up,
     /// then restores the previous config.
+    // Same deliberate `Mut`-borrow release as `runner` (see its comment).
+    #[allow(clippy::drop_non_drop)]
     pub(crate) fn wireframe_runner(world: &mut World) {
         let Some(mut pending) = world.get_resource_mut::<PendingWireframeCapture>() else {
             return;

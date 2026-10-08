@@ -11,6 +11,60 @@ The design history behind these changes lives in
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-08
+
+### Added
+
+- **Render-debug views on screenshots** (`render_debug` feature;
+  [ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)).
+  `game/screenshot` accepts a `debug_view` parameter: `depth`, `normals`,
+  `motion_vectors`, `deferred`, `deferred_base_color`, `deferred_emissive`,
+  `deferred_metallic_roughness`, `depth_pyramid` (the `bevy_dev_tools` F1
+  overlay), `wireframe` (`bevy_pbr`'s global `WireframeConfig` toggle), and —
+  under the separate `physics_debug` feature — `physics` (Avian3D collider
+  gizmos via `bevy_gizmos`, a persistent toggle rather than a one-shot
+  overlay). Overlay and wireframe captures run through a two-phase deferred
+  runner (apply camera state → warm-up frames for pipeline compile → spawn the
+  capture → restore the camera's previous state on `ScreenshotCaptured`),
+  which eliminates the warm-up race that otherwise made the first debug
+  capture show the plain render. All views verified live against a real
+  rendering host, pixel-level (depth 16.9 KB grayscale vs ~590 KB full-color;
+  wireframe/physics confirmed by their green line pixels).
+- **Batched debug views** (`debug_views` on the MCP `screenshot` tool;
+  [ADR 0010](docs/agents/adr/0010-batched-debug-views.md)). One tool call
+  captures N views of the same scene moment and returns N image blocks —
+  instead of N round trips whose captures drift apart as the game advances.
+  Each view's poll matches on the exact capture path its own `capturing`
+  response returned, so captures cannot be attributed to the wrong view (a
+  naive "newest PNG" poll did exactly that). `["physics", "wireframe",
+  "depth"]` verified in a single call.
+- **Entity-to-pixel correlation** ([ADR
+  0008](docs/agents/adr/0008-entity-to-pixel-correlation.md)). The
+  `game/entities_on_screen` BRP method — and the `entities` array embedded in
+  every `game/screenshot/get` response — projects each visible `Aabb`-bearing
+  entity through the active 3D camera into screenshot pixel space:
+  `{entity, name, center, bounding_box, depth}`, sorted nearest-first. The
+  same coordinates `game/mouse move_to` consumes, so "click entity X" is read
+  off the screenshot response rather than estimated from the image. Entities
+  are skipped behind the camera; UI cameras are never used for projection.
+- **CI** (`.github/workflows/ci.yml`): a minimal-Bevy lib guard (the lib
+  feature list must build without Bevy's default features — the wayland-sys
+  regression that motivated 0.2.1 fails here if reintroduced), build/tests/
+  clippy/docs across the feature matrix, examples, and a publish dry-run.
+  Lib tests run in the all-targets job: dev-dependencies pull full Bevy, so
+  the minimal-guard job must not see them.
+
+### Fixed
+
+- `entities_on_screen` projected `Aabb` centers in the entity's **local**
+  space, placing every entity behind the camera (0 results) — AABBs are now
+  transformed through the entity's `GlobalTransform` before projection, and
+  the projected bounding box is computed from all 8 transformed corners
+  (correct for rotated entities).
+- The physics view's `PhysicsDebugPlugin` add panicked on hosts that already
+  add it themselves (prototype_19's own UI code does) — the harness's add is
+  now guarded with `is_plugin_added`.
+
 ## [0.2.1] - 2026-10-08
 
 ### Fixed
@@ -165,3 +219,9 @@ already folded in.
   `method_prefix`/`disabled_tools` (a dedicated server serves `server/state`
   and hides the tools that are meaningless without a world render/window),
   and `pub use schemars; pub use serde_json;` re-exports.
+
+[Unreleased]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/nchashch/bevy_mcp_harness/releases/tag/v0.1.0

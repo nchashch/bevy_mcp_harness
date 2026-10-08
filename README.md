@@ -41,7 +41,16 @@ Three layers:
    - `game/screenshot` / `game/screenshot/get` — async capture → PNG on disk (persistent,
      human-browsable, with a `.json` state sidecar) → base64 on poll. Optional `label`,
      `crop` `[x,y,w,h]`, and `camera` params. Pixel-identical polls answer `unchanged: true`
-     without re-sending the image.
+     without re-sending the image. With the `render_debug` feature, a `debug_view` param
+     renders rendering internals into the capture (`depth`, `normals`, `motion_vectors`,
+     `deferred*`, `depth_pyramid`, `wireframe`; `physics` collider gizmos under
+     `physics_debug` — see [ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)).
+     Every screenshot response embeds an `entities` table: visible `Aabb` entities projected
+     into screenshot pixel space (`{entity, name, center, bounding_box, depth}`,
+     nearest-first) — see
+     [ADR 0008](docs/agents/adr/0008-entity-to-pixel-correlation.md).
+   - `game/entities_on_screen` — the same entity-projection table standalone, without a
+     capture.
    - `game/ui` — accessibility-tree dump: every laid-out node in back-to-front render order
      with its rect in screenshot pixel space, text, clickability (`bevy_ui` `Interaction`),
      pressed/hovered state, the hovered-entity set, and the mocked pointer's position. Read
@@ -60,7 +69,11 @@ Three layers:
 3. **MCP server** (`rmcp`, Streamable HTTP, stateless) on `127.0.0.1:15710/mcp`: tools
    `client_info`, `game_state`, `ui_tree`, `screenshot`, `keyboard_input`, `gamepad_input`,
    `mouse_input`, `input_sequence`, `click_node`, `wait_until`, `game_assert`, `plan_check`,
-   `read_guide` — thin proxies to the BRP methods over loopback HTTP. `plan_check` pre-flights
+   `read_guide` — thin proxies to the BRP methods over loopback HTTP. The `screenshot` tool
+   accepts `debug_views: ["depth", …]` to capture several render-debug views in one call —
+   one tool call returns N image blocks of the same scene moment, with path-matched polling
+   so captures can't be attributed to the wrong view
+   ([ADR 0010](docs/agents/adr/0010-batched-debug-views.md)). `plan_check` pre-flights
    an intended call sequence against **declared preconditions**
    (`register_game_method_with_precondition`; the built-in `screenshot` declares one too), so
    an agent catches state-machine mistakes — "play before connect", "screenshot with no
@@ -83,6 +96,19 @@ Customization beyond the config fields (`state_snapshot`, `client_info_host` for
 mode flags, `clickable` for non-`Interaction` UI conventions, `extra_tools`, `method_prefix`
 for non-game apps, `disabled_tools`, `register_game_method`): see `AGENTS.md` and the crate
 docs.
+
+## Cargo features
+
+All off by default — hosts opt into what they need:
+
+| Feature | Pulls | Enables |
+|---|---|---|
+| `render_debug` | `bevy_dev_tools`, `bevy_core_pipeline`, `bevy_pbr` | the `debug_view` / `debug_views` overlay modes and `wireframe` ([ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)) |
+| `physics_debug` | `avian3d`, `bevy_gizmos` | the `physics` debug view (Avian3D collider gizmos) |
+
+The base dependency is `bevy` with `default-features = false` and only the features this
+crate's code touches — hosts whose Bevy is minimal (headless dedicated servers) don't inherit
+`bevy_winit`/Wayland system deps. Hosts enable the rest of Bevy's features themselves.
 
 ## Usage
 
