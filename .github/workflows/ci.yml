@@ -40,7 +40,10 @@ jobs:
           echo "lib graph clean: no winit/Wayland"
 
       - name: Test (unit + doctests)
-        run: cargo test --lib --doc
+        # cargo forbids mixing `--lib` with `--doc`, so run them as two invocations.
+        run: |
+          cargo test --lib
+          cargo test --doc
 
       - name: Clippy (lib)
         run: cargo clippy --lib -- -D warnings
