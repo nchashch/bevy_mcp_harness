@@ -33,5 +33,6 @@ everything learned from the first real host adoption (prototype_19 itself).
 | [0007](./0007-token-efficiency-tool-set.md) | Token-efficiency tool set: suppression, server-side waiting, compound actions, downscale, sequences, assertions | Accepted |
 | [0008](./0008-entity-to-pixel-correlation.md) | Entity-to-pixel correlation (`entities_on_screen`) | Accepted |
 | [0009](./0009-render-debug-views-on-screenshots.md) | Render-debug views on screenshots (`debug_view` parameter) | Accepted |
+| [0010](./0010-batched-debug-views.md) | Batched debug views in one tool call (`debug_views` parameter) | Accepted |
 
 New records should be added to this index in the same commit that adds the file.

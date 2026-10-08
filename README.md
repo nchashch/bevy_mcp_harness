@@ -16,8 +16,9 @@ terms as Bevy itself.
 
 | bevy_mcp_harness | bevy |
 |---|---|
-| 0.2.x | 0.19.1+ |
-| 0.1.x | 0.19.1+ |
+| 0.3 | 0.19.1 |
+| 0.2 | 0.19.1 |
+| 0.1 | 0.19.1 |
 
 One harness line per bevy minor release. 0.1.x requires bevy **0.19.1 or later 0.19.x** — the
 crate reads bevy internals whose shape changed within 0.19 (e.g. `RenderTarget::as_image()`
