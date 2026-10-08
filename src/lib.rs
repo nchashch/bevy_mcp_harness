@@ -496,6 +496,7 @@ impl Plugin for BevyMcpHarnessPlugin {
 
         app.insert_resource(config.clone());
         app.init_resource::<brp::LastServedCapture>();
+        app.init_resource::<brp::LastUiDump>();
         app.init_resource::<brp::GamePreconditions>();
 
         let state_method = app.register_system(brp::game_state_method);

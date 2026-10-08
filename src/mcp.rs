@@ -7,7 +7,7 @@ use bevy::log::{error, info};
 use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData, ServerConfig, Tool};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 // The agent-facing guides, compiled into the binary (include_str = compile-time, so they ship
@@ -128,6 +128,120 @@ pub struct PlanCheckParams {
     /// `{"method": "game/input", "params": {...}}` for methods whose precondition reads
     /// params. Full method names, including the prefix.
     pub calls: Vec<serde_json::Value>,
+}
+
+/// The `ui_tree` tool's parameters — all optional.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UiTreeParams {
+    /// Only dump interactive rows (the "find the button" read).
+    pub clickable_only: Option<bool>,
+    /// Only rows whose text contains this substring (case-insensitive).
+    pub text_contains: Option<String>,
+    /// Force a full dump even when the filtered node list is identical to the previous read
+    /// (the default re-read answers `{unchanged: true}` with the nodes omitted).
+    pub refresh: Option<bool>,
+}
+
+/// The `wait_until` tool's parameters. Conditions: `path` + `equals` (a dot-separated key path
+/// into the polled payload, compared to an expected value), or — for `game/ui` —
+/// `text_contains` (any node's text matching, case-insensitive). At least one condition is
+/// required.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitUntilParams {
+    /// What to poll: `game_state` (the app's state snapshot) or `game_ui` (the UI dump).
+    pub source: String,
+    /// Dot-separated key path into the polled payload (e.g. `game_state`, `position.x`,
+    /// `host.mcp`). Required for `equals`.
+    pub path: Option<String>,
+    /// Wait until the value at `path` equals this (JSON equality; numbers compare
+    /// numerically).
+    pub equals: Option<serde_json::Value>,
+    /// `game_ui` only: wait until any node's text contains this (case-insensitive). The UI
+    /// dump is filtered server-side, so the returned `last` payload is already small.
+    pub text_contains: Option<String>,
+    /// Poll interval. Default 200, clamped 50..=2000 (ms).
+    pub interval_ms: Option<u64>,
+    /// Give up after this long, returning `met: false` plus the last payload. Default 10000,
+    /// clamped 100..=60000 (ms).
+    pub timeout_ms: Option<u64>,
+}
+
+enum WaitCondition {
+    UiText(String),
+    PathEquals(Option<String>, serde_json::Value),
+}
+
+/// Extracts a dot-separated key path (numeric segments index arrays) from a JSON payload.
+fn json_path<'a>(payload: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = payload;
+    for segment in path.split('.') {
+        match current {
+            serde_json::Value::Object(map) => current = map.get(segment)?,
+            serde_json::Value::Array(items) => {
+                current = items.get(segment.parse::<usize>().ok()?)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+/// JSON equality with numeric leniency: `100 == 100.0`.
+fn values_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
+        return (x - y).abs() < f64::EPSILON || x == y;
+    }
+    a == b
+}
+
+/// The `click_node` tool's parameters — exactly one selector.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ClickNodeParams {
+    /// Case-insensitive substring of the node's text (buttons aggregate their label, so
+    /// `"Connect"` matches the Connect button's row).
+    pub text_contains: Option<String>,
+    /// The node's entity id, as `game/ui` dumps it.
+    pub entity: Option<u64>,
+    /// The node's exact `[x, y, w, h]` rect, as a previous `game/ui` dump reported it.
+    pub rect: Option<Vec<f64>>,
+    /// Milliseconds between move→press→release so bevy's per-frame hover/click processing
+    /// sees each step. Default 50, clamped 0..=1000.
+    pub step_delay_ms: Option<u64>,
+}
+
+/// The `input_sequence` tool's parameters.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct InputSequenceParams {
+    /// Steps: a device-mock call (`{"keyboard": {…}}`, `{"gamepad": {…}}`, `{"mouse": {…}}` —
+    /// the inner object is that mock's full params) or a wait (`{"ticks": 60}` — 60 frames ≈
+    /// 1 s at 60 Hz). Max 100 steps; total wait budget 3600 ticks.
+    pub steps: Vec<serde_json::Value>,
+    /// Milliseconds per tick for `ticks` steps. Default 16.7 (60 Hz).
+    pub tick_ms: Option<f64>,
+}
+
+/// The `game_assert` tool's parameters.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AssertParams {
+    /// Expectations, each `{"source": "game_state"|"game_ui", "path": "dot.separated.key",
+    /// "op": "eq"|"ne"|"gt"|"gte"|"lt"|"lte"|"exists"|"text_contains", "value": …}`.
+    /// `text_contains` (game_ui) checks any node's text, case-insensitive; numbers compare
+    /// numerically.
+    pub expectations: Vec<serde_json::Value>,
+}
+
+/// The display text of every node in a UI dump payload.
+fn node_texts(payload: &serde_json::Value) -> impl Iterator<Item = &str> {
+    payload
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|node| node.get("text").and_then(Value::as_str))
+        })
+        .into_iter()
+        .flatten()
 }
 
 /// A loopback HTTP client to the app's BRP surface — the handle handed to every
@@ -419,6 +533,10 @@ pub struct ScreenshotParams {
     /// dumps (e.g. a button's rect). A crop costs fewer vision tokens and keeps full effective
     /// resolution on the region of interest. Clamped to frame bounds.
     pub crop: Option<Vec<f64>>,
+    /// Optional overview downscale: the encoded PNG fits within this many pixels on its long
+    /// edge (aspect preserved, clamped 64..=4096). Use ~640 for overview checks; omit for
+    /// full-resolution detail reads.
+    pub max_dimension: Option<u32>,
 }
 
 /// The tool definitions live in this block; the handlers proxy to BRP.
@@ -447,17 +565,17 @@ impl GameTools {
     /// The host's `game/state` snapshot (empty unless the app registered a snapshot hook).
     #[rmcp::tool(description = "Snapshot of the current game state as registered by the host app (app state, player entity/position/health, whatever the game exposes). Empty object if the host registered no snapshot hook. Call this before/after other tools to see what changed.")]
     async fn game_state(&self) -> Result<CallToolResult, ErrorData> {
-        let result = self.brp(&self.method("game/state"), json!({})).await?;
+        let result = self.brp(&self.method("state"), json!({})).await?;
         Self::text_result(result).await
     }
 
     /// Captures a screenshot of the game (PNG) and returns it as image content PLUS the game's
     /// ground-truth state as JSON. The capture is async (one render frame), so this polls
     /// `game/screenshot/get` briefly. Optional `crop` targets a region of interest.
-    #[rmcp::tool(description = "Capture a screenshot of the game. Returns the PNG as image content PLUS the game's ground-truth state as JSON text (same payload as game_state), so you never need to read numbers off the HUD. Optional `crop` [x,y,w,h] captures just a region (read the rect off game/ui first) — cheaper and sharper than a full frame. A visible crosshair marks your mocked mouse cursor when running headless (red = idle, yellow = hovering, white = left held). If the response says unchanged:true, the pixels are IDENTICAL to the last image you were served — do not ask for it again; read the included state instead.")]
+    #[rmcp::tool(description = "Capture a screenshot of the game. Returns the PNG as image content PLUS the game's ground-truth state as JSON text (same payload as game_state), so you never need to read numbers off the HUD. Optional `crop` [x,y,w,h] captures just a region (read the rect off game/ui first) — cheaper and sharper than a full frame. Optional `max_dimension` (64..=4096) downscales the encoded PNG to fit that many pixels on the long edge — use ~640 for overview checks (did it render, is the menu up) to cut vision tokens ~4×; omit for full-resolution detail reads. A visible crosshair marks your mocked mouse cursor when running headless (red = idle, yellow = hovering, white = left held). If the response says unchanged:true, the pixels are IDENTICAL to the last image you were served — do not ask for it again; read the included state instead.")]
     async fn screenshot(
         &self,
-        Parameters(ScreenshotParams { label, crop }): Parameters<ScreenshotParams>,
+        Parameters(ScreenshotParams { label, crop, max_dimension }): Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let mut params = json!({});
         if let Some(label) = label {
@@ -472,10 +590,13 @@ impl GameTools {
             }
             params["crop"] = json!(crop);
         }
-        self.brp(&self.method("game/screenshot"), params).await?;
+        if let Some(max_dimension) = max_dimension {
+            params["max_dimension"] = json!(max_dimension.clamp(64, 4096));
+        }
+        self.brp(&self.method("screenshot"), params).await?;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let result = self.brp(&self.method("game/screenshot/get"), json!({})).await?;
+            let result = self.brp(&self.method("screenshot/get"), json!({})).await?;
             if result.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
                 continue;
             }
@@ -510,7 +631,7 @@ impl GameTools {
     /// Reports this harness's launch configuration: mode flags and surface ports.
     #[rmcp::tool(description = "Report this harness's launch configuration: no_render flag, brp_port, mcp_port, screenshots_dir, whether screenshots are available, and the offscreen target size (headless). Call this FIRST on any session — it tells you which tools are meaningful here (e.g. no_render clients have no screenshots and never load world visuals) and which port each surface is on when testing several clients at once.")]
     async fn client_info(&self) -> Result<CallToolResult, ErrorData> {
-        let result = self.brp(&self.method("game/client_info"), json!({})).await?;
+        let result = self.brp(&self.method("client_info"), json!({})).await?;
         Self::text_result(result).await
     }
 
@@ -530,6 +651,7 @@ impl GameTools {
     /// Pre-flight check for a sequence of intended BRP calls. Params: `calls` — a list of bare
     /// method names or `{method, params}` objects. Reports per call whether it would pass, and
     /// for unknown methods or methods with a declared, currently-unmet precondition, why.
+    /// Use this to plan a multi-step flow and catch state-machine mistakes cheaply.
     #[rmcp::tool(description = "Pre-flight check a sequence of intended calls BEFORE sending them. `calls` is a list of BRP method names (e.g. \"game/trigger\") or objects {\"method\": \"game/input\", \"params\": {...}}. Returns per-call ok:true, or ok:false with the reason (unknown method; declared precondition unmet — e.g. game/input requires an in-game local player, game/screenshot requires rendering). Methods without a declared precondition report ok:true with precondition:none — the harness can only vouch for what the host declared. Use this to plan a multi-step flow and catch state-machine mistakes cheaply.")]
     async fn plan_check(
         &self,
@@ -541,12 +663,367 @@ impl GameTools {
         Self::text_result(result).await
     }
 
+    /// Server-side polling with a timeout: one call instead of a sleep/re-poll loop, so
+    /// waiting for a state transition costs one tool round trip instead of N.
+    #[rmcp::tool(description = "Wait until the app reaches a state, polling server-side — ONE call instead of a sleep/re-poll loop. source: game_state (the app's state snapshot) or game_ui (the UI dump). Conditions (at least one): path+equals (dot-separated key path into the payload vs an expected value, e.g. path \"game_state\" equals \"InGame\"), or — for game_ui — text_contains (any node's text, case-insensitive). Polls every interval_ms (default 200) until met or timeout_ms (default 10000) elapses; returns {met, attempts, elapsed_ms, last} where last is the final payload (for game_ui it is already filtered to the matching nodes). Prefer this over sleeping between calls.")]
+    async fn wait_until(
+        &self,
+        Parameters(WaitUntilParams { source, path, equals, text_contains, interval_ms, timeout_ms }): Parameters<WaitUntilParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let source_method = match source.as_str() {
+            "game_state" => "state",
+            "game_ui" => "ui",
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown source {other:?} (expected game_state|game_ui)"),
+                    None,
+                ))
+            }
+        };
+        let condition = match (path.as_deref().filter(|p| !p.is_empty()), equals.as_ref(), text_contains.as_deref().filter(|t| !t.is_empty())) {
+            (None, None, Some(needle)) if source == "game_ui" => WaitCondition::UiText(needle.to_lowercase()),
+            (path, Some(expected), _) => WaitCondition::PathEquals(path.map(str::to_owned), expected.clone()),
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    "provide path+equals, or text_contains (game_ui only)".to_owned(),
+                    None,
+                ))
+            }
+        };
+        let interval = std::time::Duration::from_millis(interval_ms.unwrap_or(200).clamp(50, 2000));
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000).clamp(100, 60_000));
+
+        let mut attempts = 0u32;
+        let started = std::time::Instant::now();
+        loop {
+            attempts += 1;
+            let fetch_params = match &condition {
+                WaitCondition::UiText(needle) => {
+                    json!({"text_contains": needle, "refresh": true})
+                }
+                _ => json!({}),
+            };
+            let payload = self.brp(&self.method(source_method), fetch_params).await?;
+            let met = match &condition {
+                WaitCondition::UiText(_) => payload
+                    .get("nodes")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|nodes| !nodes.is_empty()),
+                WaitCondition::PathEquals(path, expected) => {
+                    let empty = serde_json::Value::Null;
+                    json_path(&payload, path.as_deref().unwrap_or(""))
+                        .or(Some(&empty))
+                        .is_some_and(|value| values_equal(value, expected))
+                }
+            };
+            if met || std::time::Instant::now() >= deadline {
+                let response = json!({
+                    "met": met,
+                    "attempts": attempts,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "last": payload,
+                });
+                return Self::text_result(response).await;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// Compound UI click: dump → match a clickable node → move the mocked pointer to its
+    /// center → press → release → return the post-click UI dump. One call replaces the
+    /// dump/move/press/release/re-dump sequence.
+    #[rmcp::tool(description = "Click a UI node by matching it in the game/ui dump: text_contains (case-insensitive substring of the node's text — buttons aggregate their label), entity, or rect (exact [x,y,w,h] from a previous dump). Exactly one selector. The flow executed server-side: dump game/ui → match a CLICKABLE node → move_to its center → press Left → release Left → return the POST-CLICK full game/ui dump (so you see the effect without another call). Fails with a readable error when no clickable node matches (read game/ui and pick from the clickable rows). step_delay_ms (default 50) spaces move→press→release so bevy's per-frame hover/click processing sees each step.")]
+    async fn click_node(
+        &self,
+        Parameters(ClickNodeParams { text_contains, entity, rect, step_delay_ms }): Parameters<ClickNodeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let selectors = [&text_contains.is_some(), &entity.is_some(), &rect.is_some()]
+            .into_iter()
+            .filter(|provided| **provided)
+            .count();
+        if selectors != 1 {
+            return Err(ErrorData::invalid_params(
+                "provide exactly one of: text_contains | entity | rect".to_owned(),
+                None,
+            ));
+        }
+        let step_delay = std::time::Duration::from_millis(step_delay_ms.unwrap_or(50).clamp(0, 1000));
+
+        // 1. Fresh full dump (refresh skips the unchanged suppression).
+        let dump = self.brp(&self.method("ui"), json!({"refresh": true})).await?;
+        let nodes = dump
+            .get("nodes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| ErrorData::internal_error("game/ui returned no nodes array", None))?;
+        let matches = |node: &serde_json::Value| -> bool {
+            if let Some(needle) = text_contains.as_deref().map(str::to_lowercase) {
+                return node
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| text.to_lowercase().contains(&needle));
+            }
+            if let Some(want) = entity {
+                return node.get("entity") == Some(&json!(want));
+            }
+            if let Some(want) = &rect {
+                return node.get("rect") == Some(&json!(want));
+            }
+            false
+        };
+        let node = nodes
+            .iter()
+            .find(|node| {
+                node.get("clickable").and_then(serde_json::Value::as_bool) == Some(true)
+                    && matches(node)
+            })
+            .ok_or_else(|| {
+                ErrorData::internal_error(
+                    match text_contains.as_deref() {
+                        Some(needle) => format!(
+                            "no clickable node with text containing {needle:?} — call ui_tree and pick from the clickable rows (clickable_only:true keeps this read small)"
+                        ),
+                        None => "no clickable node matches — call ui_tree and pick from the clickable rows".to_owned(),
+                    },
+                    None,
+                )
+            })?;
+
+        // 2. Move to the node's center. The rect is already in pointer-pixel space.
+        let node_rect: Vec<f64> = node
+            .get("rect")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|values| values.iter().map(serde_json::Value::as_f64).collect())
+            .ok_or_else(|| ErrorData::internal_error("matched node has no rect", None))?;
+        let [x, y, w, h] = node_rect[..] else {
+            return Err(ErrorData::internal_error(
+                "matched node's rect is not [x, y, w, h]",
+                None,
+            ));
+        };
+        let center = json!({"input": "move_to", "x": x + w / 2.0, "y": y + h / 2.0});
+        self.brp(&self.method("mouse"), center).await?;
+        tokio::time::sleep(step_delay).await;
+
+        // 3. Press + release through both mechanisms (ButtonInput and bevy_picking), with a
+        // frame between them so click detectors see press and release as separate events.
+        self.brp(
+            &self.method("mouse"),
+            json!({"input": "button", "button": "Left", "pressed": true}),
+        )
+        .await?;
+        tokio::time::sleep(step_delay).await;
+        self.brp(
+            &self.method("mouse"),
+            json!({"input": "button", "button": "Left", "pressed": false}),
+        )
+        .await?;
+
+        // 4. The post-click UI dump is the effect read — no extra call needed.
+        let post = self.brp(&self.method("ui"), json!({"refresh": true})).await?;
+        let response = json!({
+            "clicked": true,
+            "node": node,
+            "post_ui": post,
+        });
+        Self::text_result(response).await
+    }
+
+    /// Scripted device-mock input with internal timing: one call instead of a chain of mock
+    /// calls with sleeps between them.
+    #[rmcp::tool(description = "Execute a SCRIPTED SEQUENCE of device-mock inputs with internal timing — one call instead of a chain of keyboard_input/gamepad_input/mouse_input calls with waits. `steps`: each is a device-mock call ({\"keyboard\": {\"key\": \"KeyW\", \"pressed\": true}} or {\"gamepad\": {\"input\": \"button\", \"button\": \"South\", \"pressed\": true}} or {\"mouse\": {\"input\": \"move_to\", \"x\": 640, \"y\": 400}}) or a wait ({\"ticks\": 60} — 60 frames ≈ 1 s at 60 Hz; tick_ms overrides). The full p19-style choreography (hold W, wait, jump, release, turn) is one call. Level-triggered mocks stay held exactly as the sequence leaves them — budget explicit releases. Total wait budget: 3600 ticks. Afterwards observe with game_state or wait_until.")]
+    async fn input_sequence(
+        &self,
+        Parameters(InputSequenceParams { steps, tick_ms }): Parameters<InputSequenceParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if steps.len() > 100 {
+            return Err(ErrorData::invalid_params(
+                format!("too many steps ({}) — max 100", steps.len()),
+                None,
+            ));
+        }
+        let tick = std::time::Duration::from_secs_f64(tick_ms.unwrap_or(16.7) / 1000.0);
+        let mut executed = Vec::new();
+        let started = std::time::Instant::now();
+        for (idx, step) in steps.iter().enumerate() {
+            let Some(object) = step.as_object() else {
+                return Err(ErrorData::invalid_params(
+                    format!("step {idx} must be an object"),
+                    None,
+                ));
+            };
+            if let Some(ticks) = object.get("ticks").and_then(serde_json::Value::as_u64) {
+                let ticks = ticks.min(3600);
+                tokio::time::sleep(tick.mul_f64(ticks as f64)).await;
+                executed.push(json!({"step": idx, "waited_ticks": ticks}));
+                continue;
+            }
+            let device = object
+                .keys()
+                .find(|key| matches!(key.as_str(), "keyboard" | "gamepad" | "mouse"))
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!(
+                            "step {idx}: expected one of keyboard|gamepad|mouse|ticks, got {:?}",
+                            object.keys().collect::<Vec<_>>()
+                        ),
+                        None,
+                    )
+                })?;
+            let params = object.get(device).cloned().unwrap_or(json!({}));
+            if !params.is_object() {
+                return Err(ErrorData::invalid_params(
+                    format!("step {idx}: {device} must be an object of mock params"),
+                    None,
+                ));
+            }
+            let method = self.method(device);
+            self.brp(&method, params).await?;
+            executed.push(json!({"step": idx, "device": device}));
+        }
+        let response = json!({
+            "steps_executed": executed.len(),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "steps": executed,
+        });
+        Self::text_result(response).await
+    }
+
+    /// Declarative verification: the agent writes compact expectations instead of reading a
+    /// full state/dump and reasoning over it; the harness returns pass/fail with only the
+    /// mismatches (including actuals).
+    #[rmcp::tool(description = "Assert expectations about the app's state/UI and get a compact pass/fail + mismatches (with actuals) — write expectations instead of reading full dumps and reasoning over them. `expectations`: each is {\"source\": \"game_state\"|\"game_ui\", \"path\": \"dot.separated.key\" (into the payload), \"op\": \"eq\"|\"ne\"|\"gt\"|\"gte\"|\"lt\"|\"lte\"|\"exists\"|\"text_contains\", \"value\": ...} — text_contains (game_ui) checks any node's text, case-insensitive; path may be omitted when op is text_contains. Numbers compare numerically. Returns {passed, passed_count, failed_count, failures: [{expectation, actual}], payloads} where payloads holds the fetched sources (game_state is small; game_ui is the full dump).")]
+    async fn game_assert(
+        &self,
+        Parameters(AssertParams { expectations }): Parameters<AssertParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if expectations.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "provide at least one expectation".to_owned(),
+                None,
+            ));
+        }
+
+        // Fetch each referenced source once.
+        let sources: std::collections::HashSet<&str> = expectations
+            .iter()
+            .filter_map(|expectation| expectation.get("source").and_then(Value::as_str))
+            .collect();
+        let mut payloads = serde_json::Map::new();
+        for source in &sources {
+            let fetch_params = if *source == "game_ui" {
+                json!({"refresh": true})
+            } else {
+                json!({})
+            };
+            payloads.insert(
+                (*source).to_owned(),
+                self.brp(&self.method(source.strip_prefix("game_").unwrap_or(source)), fetch_params)
+                    .await?,
+            );
+        }
+
+        let mut passed_count = 0u32;
+        let mut failures = Vec::new();
+        for expectation in &expectations {
+            let source = expectation.get("source").and_then(Value::as_str).unwrap_or("");
+            let path = expectation.get("path").and_then(Value::as_str).unwrap_or("");
+            let op = expectation
+                .get("op")
+                .and_then(Value::as_str)
+                .unwrap_or(if expectation.get("text_contains").is_some() { "text_contains" } else { "eq" });
+            let payload = payloads.get(source).ok_or_else(|| {
+                ErrorData::invalid_params(
+                    format!("unknown source {source:?} (expected game_state|game_ui)"),
+                    None,
+                )
+            })?;
+            let actual = json_path(payload, path).cloned().unwrap_or(Value::Null);
+
+            let passed = match op {
+                "exists" => !actual.is_null(),
+                "text_contains" => {
+                    let needle = expectation
+                        .get("text_contains")
+                        .or_else(|| expectation.get("value"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    node_texts(payload).any(|text| text.to_lowercase().contains(&needle))
+                }
+                op => {
+                    let Some(expected) = expectation.get("value") else {
+                        failures.push(json!({
+                            "expectation": expectation,
+                            "error": format!("op {op:?} requires a value"),
+                        }));
+                        continue;
+                    };
+                    match op {
+                        "eq" => values_equal(&actual, expected),
+                        "ne" => !values_equal(&actual, expected),
+                        "gt" | "gte" | "lt" | "lte" => {
+                            let (Some(x), Some(y)) = (actual.as_f64(), expected.as_f64()) else {
+                                failures.push(json!({
+                                    "expectation": expectation,
+                                    "actual": actual,
+                                    "error": format!("op {op:?} requires numeric values"),
+                                }));
+                                continue;
+                            };
+                            match op {
+                                "gt" => x > y,
+                                "gte" => x >= y,
+                                "lt" => x < y,
+                                _ => x <= y,
+                            }
+                        }
+                        _ => {
+                            failures.push(json!({
+                                "expectation": expectation,
+                                "error": format!("unknown op {op:?} (expected eq|ne|gt|gte|lt|lte|exists|text_contains)"),
+                            }));
+                            continue;
+                        }
+                    }
+                }
+            };
+            if passed {
+                passed_count += 1;
+            } else {
+                failures.push(json!({ "expectation": expectation, "actual": actual }));
+            }
+        }
+
+        let response = json!({
+            "passed": failures.is_empty(),
+            "passed_count": passed_count,
+            "failed_count": failures.len(),
+            "failures": failures,
+            "payloads": payloads,
+        });
+        Self::text_result(response).await
+    }
+
     /// Dumps the UI tree: labeled rects + text for every visible UI node, in screenshot pixel
     /// space, so clicks can target coordinates read off this dump instead of guessed from
     /// pixels.
-    #[rmcp::tool(description = "Dump the UI tree as an accessibility-tree-style list: every visible UI node's rect [x,y,w,h] in the SAME screenshot pixel space game/mouse move_to consumes, its text (button labels), and interaction/hover state. Read THIS to find what to click and where, then use mouse_input move_to + button Left to click it. Much more reliable than estimating coordinates from the screenshot image. Also useful to verify text rendered (the dump shows the string regardless of font issues).")]
-    async fn ui_tree(&self) -> Result<CallToolResult, ErrorData> {
-        let result = self.brp(&self.method("game/ui"), json!({})).await?;
+    #[rmcp::tool(description = "Dump the UI tree as an accessibility-tree-style list: every visible UI node's rect [x,y,w,h] in the SAME screenshot pixel space game/mouse move_to consumes, its text (button labels), and interaction/hover state. Read THIS to find what to click and where, then use mouse_input move_to + button Left to click it. Much more reliable than estimating coordinates from the screenshot image. Also useful to verify text rendered (the dump shows the string regardless of font issues). Unchanged suppression: a re-read whose filtered node list is identical to the previous one returns {unchanged: true, node_count, pointer} WITHOUT the nodes — pass refresh:true to force a full dump. Filters: clickable_only (the find-the-button read), text_contains (substring, case-insensitive).")]
+    async fn ui_tree(
+        &self,
+        Parameters(UiTreeParams { clickable_only, text_contains, refresh }): Parameters<UiTreeParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut params = json!({});
+        if clickable_only == Some(true) {
+            params["clickable_only"] = json!(true);
+        }
+        if let Some(text) = text_contains.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            params["text_contains"] = json!(text);
+        }
+        if refresh == Some(true) {
+            params["refresh"] = json!(true);
+        }
+        let result = self.brp(&self.method("ui"), params).await?;
         Self::text_result(result).await
     }
 
@@ -581,7 +1058,7 @@ impl GameTools {
                 ))
             }
         };
-        let result = self.brp(&self.method("game/gamepad"), params).await?;
+        let result = self.brp(&self.method("gamepad"), params).await?;
         Self::text_result(result).await
     }
 
@@ -600,7 +1077,7 @@ impl GameTools {
             })?;
             json!({"key": key, "pressed": pressed.unwrap_or(true)})
         };
-        let result = self.brp(&self.method("game/keyboard"), params).await?;
+        let result = self.brp(&self.method("keyboard"), params).await?;
         Self::text_result(result).await
     }
 
@@ -650,7 +1127,7 @@ impl GameTools {
                 ))
             }
         };
-        let result = self.brp(&self.method("game/mouse"), params).await?;
+        let result = self.brp(&self.method("mouse"), params).await?;
         Self::text_result(result).await
     }
 }

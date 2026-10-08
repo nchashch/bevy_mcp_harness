@@ -48,7 +48,8 @@ Three layers, in one data flow:
    `RemoteMethods` in `BevyMcpHarnessPlugin::build`.
 3. **MCP server** (`src/mcp.rs`): rmcp Streamable HTTP, stateless, on `127.0.0.1:15710/mcp`.
    Tools (`client_info`, `game_state`, `ui_tree`, `screenshot`, `keyboard_input`,
-   `gamepad_input`, `mouse_input`, `read_guide`, plus host `extra_tools`) proxy to BRP over
+   `gamepad_input`, `mouse_input`, `input_sequence`, `click_node`, `wait_until`,
+   `game_assert`, `plan_check`, `read_guide`, plus host `extra_tools`) proxy to BRP over
    loopback HTTP via [`BrpClient`]. `read_guide` serves the agent guides bundled into the
    binary at compile time (`include_str!` of `docs/agents/skills/playtest.md`,
    `docs/agents/skills/bugreport.md`,

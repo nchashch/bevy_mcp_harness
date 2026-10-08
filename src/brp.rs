@@ -21,6 +21,58 @@ use serde_json::json;
 use crate::headless::CaptureTarget;
 use crate::{McpHarnessConfig, NoRenderMode, PreconditionFn};
 
+/// The nodes payload of the last `game/ui` dump served in full. If the next read's filtered
+/// node list hashes identically, the response omits `nodes` (`unchanged: true`) — agents
+/// re-read the UI after every input mostly to check "did anything change", and the full dump
+/// is the most expensive repeated read. Hashing the *filtered* node list means a changed
+/// filter is a changed hash (full dump).
+#[derive(Resource, Default)]
+pub(crate) struct LastUiDump {
+    hash: Option<u64>,
+}
+
+/// `game/ui` read filters.
+#[derive(Default)]
+struct UiFilter {
+    clickable_only: bool,
+    text_contains: Option<String>,
+}
+
+impl UiFilter {
+    fn from_params(params: Option<&serde_json::Value>) -> Self {
+        let get = |key: &str| {
+            params
+                .and_then(|p| p.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        };
+        Self {
+            clickable_only: params
+                .and_then(|p| p.get("clickable_only"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            text_contains: get("text_contains").map(|s| s.to_lowercase()),
+        }
+    }
+
+    fn keeps(&self, row_text: Option<&str>, clickable: bool) -> bool {
+        if self.clickable_only && !clickable {
+            return false;
+        }
+        match &self.text_contains {
+            Some(needle) => row_text.is_some_and(|text| text.to_lowercase().contains(needle)),
+            None => true,
+        }
+    }
+}
+
+fn hash_value(value: &serde_json::Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&serde_json::to_string(value).unwrap_or_default(), &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
 /// Declared preconditions by full BRP method name (`{prefix}/name`), populated by
 /// [`crate::register_game_method_with_precondition`] and the harness's own built-ins, read by
 /// the `{prefix}/plan_check` pre-flight method.
@@ -271,7 +323,7 @@ fn newest_screenshot(dir: &Path) -> Option<PathBuf> {
 }
 
 /// `game/screenshot` — starts an async capture. The PNG is written into the configured
-/// screenshots directory (encoded by [`save_cropped_to_disk`], async); poll
+/// screenshots directory (encoded by `save_encoded_to_disk`, async); poll
 /// `game/screenshot/get` until it reports `ready`. Optional params: `{"label": "..."}` for the
 /// filename, `{"crop": [x, y, w, h]}` to save only that sub-rect — in the same screenshot pixel
 /// space `game/ui` dumps, so "crop to a button's rect from the dump" just works. A crop costs
@@ -296,6 +348,18 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         Some(value) => Some(parse_crop(value).ok_or_else(|| {
             BrpError::internal("crop must be [x, y, w, h] — four pixel numbers")
         })?),
+        None => None,
+    };
+    // Optional overview downscale: the encoded PNG fits within this many pixels on its long
+    // edge (aspect preserved). The capture itself stays full-resolution; the crop (if any) is
+    // applied first, then the resize — a cropped region keeps full effective resolution.
+    let max_dimension = match params.0.as_ref().and_then(|p| p.get("max_dimension")) {
+        Some(value) => {
+            let requested = value.as_u64().ok_or_else(|| {
+                BrpError::internal("max_dimension must be a positive pixel count")
+            })?;
+            Some(requested.clamp(64, 4096) as u32)
+        }
         None => None,
     };
     // Optional camera entity (as the u64 id `game/cameras` reports): temporarily retarget that
@@ -362,13 +426,14 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .unwrap_or_else(Screenshot::primary_window);
     world
         .spawn(capture_target)
-        .observe(save_cropped_to_disk(path.clone(), crop))
+        .observe(save_encoded_to_disk(path.clone(), crop, max_dimension))
         .observe(restore_camera_order);
     Ok(json!({
         "status": "capturing",
         "poll": "game/screenshot/get",
         "path": path.display().to_string(),
         "crop": crop,
+        "max_dimension": max_dimension,
     }))
 }
 
@@ -382,7 +447,7 @@ struct CameraCaptureRestore {
 }
 
 /// Runs on the capture entity when it completes: puts the borrowed camera's original draw
-/// order/clear config back. Runs after [`save_cropped_to_disk`] (which only reads the
+/// order/clear config back. Runs after `save_encoded_to_disk` (which only reads the
 /// already-transferred image), so the restore never races the encode.
 fn restore_camera_order(
     _captured: On<ScreenshotCaptured>,
@@ -424,9 +489,13 @@ fn parse_crop(value: &serde_json::Value) -> Option<[u32; 4]> {
 /// the frame's bounds so an out-of-range crop degrades to the intersection instead of
 /// panicking. Mirrors `save_to_disk`'s HDR-safety (`to_rgb8` drops the alpha channel). The
 /// capture itself is always of the full render target — the crop is applied at encode time.
-fn save_cropped_to_disk(
+/// `max_dimension` (when set) downscales the *encoded* result to fit within that many pixels
+/// on the long edge (aspect preserved, Lanczos3) — overview reads cost fewer vision tokens;
+/// the capture itself stays full-resolution.
+fn save_encoded_to_disk(
     path: impl AsRef<Path>,
     crop: Option<[u32; 4]>,
+    max_dimension: Option<u32>,
 ) -> impl FnMut(On<ScreenshotCaptured>) {
     let path = path.as_ref().to_owned();
     move |captured: On<ScreenshotCaptured>| {
@@ -448,8 +517,28 @@ fn save_cropped_to_disk(
                 image::DynamicImage::ImageRgb8(image::imageops::crop_imm(&rgb, x, y, w, h).to_image())
             }
         };
-        match cropped.save_with_format(&path, image::ImageFormat::Png) {
-            Ok(_) => info!("Screenshot saved to {} (crop: {crop:?})", path.display()),
+        let encoded = match max_dimension {
+            Some(max) => {
+                let long = cropped.width().max(cropped.height());
+                (long > max).then(|| {
+                    let scale = max as f64 / long as f64;
+                    (
+                        (cropped.width() as f64 * scale).round().max(1.0) as u32,
+                        (cropped.height() as f64 * scale).round().max(1.0) as u32,
+                    )
+                })
+            }
+            None => None,
+        }
+        .map(|(w, h)| cropped.resize_exact(w, h, image::imageops::FilterType::Lanczos3))
+        .unwrap_or(cropped);
+        match encoded.save_with_format(&path, image::ImageFormat::Png) {
+            Ok(_) => info!(
+                "Screenshot saved to {} (crop: {crop:?}, max_dimension: {max_dimension:?}, {}×{})",
+                path.display(),
+                encoded.width(),
+                encoded.height()
+            ),
             Err(e) => error!("Cannot save screenshot, IO error: {e}"),
         }
     }
@@ -559,8 +648,56 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
 /// ancestor and not emitted twice. The agent cursor's own overlay nodes are excluded. In
 /// headless mode only nodes targeting the offscreen capture are dumped; windowed dumps
 /// everything.
-pub(crate) fn ui_dump_method(_params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
-    Ok(ui_dump_snapshot(world))
+///
+/// Read filters (optional params):
+/// - `{"clickable_only": true}` — only interactive rows (the "find the button" read).
+/// - `{"text_contains": "Play"}` — rows whose text matches (case-insensitive substring).
+/// - `{"refresh": true}` — force a full dump even when the filtered node list is identical to
+///   the last read.
+///
+/// Unchanged suppression: the filtered node list is hashed; identical to the previous read →
+/// `{unchanged: true, node_count, pointer, hovered_entities}` **without** `nodes` (the agent
+/// already holds that dump). The filter is part of the hash — a different filter is a
+/// different read.
+pub(crate) fn ui_dump_method(params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
+    let filter = UiFilter::from_params(params.0.as_ref());
+    let refresh = params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("refresh"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let mut dump = ui_dump_snapshot(world, &filter);
+
+    let node_count = dump["nodes"].as_array().map(|nodes| nodes.len()).unwrap_or(0);
+    let hash = hash_value(&dump["nodes"]);
+    let unchanged = !refresh
+        && world
+            .get_resource::<LastUiDump>()
+            .is_some_and(|last| last.hash == Some(hash));
+
+    if let Some(mut last) = world.get_resource_mut::<LastUiDump>() {
+        last.hash = Some(hash);
+    }
+    if unchanged {
+        // The agent already holds this exact dump; keep only the cheap, changing fields.
+        let mut payload = serde_json::Map::new();
+        for key in ["pointer", "hovered_entities", "target_size"] {
+            if let Some(value) = dump.get(key) {
+                payload.insert(key.to_owned(), value.clone());
+            }
+        }
+        payload.insert("unchanged".into(), json!(true));
+        payload.insert("node_count".into(), json!(node_count));
+        payload.insert(
+            "note".into(),
+            json!("nodes omitted — identical to the previous game/ui read; pass refresh:true to force a full dump"),
+        );
+        return Ok(serde_json::Value::Object(payload));
+    }
+    dump["node_count"] = json!(node_count);
+    Ok(dump)
 }
 
 /// The cursor overlay's root node — zero-size, absolutely positioned, follows the mocked
@@ -714,8 +851,9 @@ pub(crate) fn update_agent_cursor(
     }
 }
 
-/// The [`ui_dump_method`] payload. See that function's doc comment for the semantics.
-fn ui_dump_snapshot(world: &mut World) -> serde_json::Value {
+/// The [`ui_dump_method`] payload. See that function's doc comment for the semantics and the
+/// read filters.
+fn ui_dump_snapshot(world: &mut World, filter: &UiFilter) -> serde_json::Value {
     let offscreen = world
         .get_resource::<CaptureTarget>()
         .map(|target| target.0.clone());
@@ -859,6 +997,10 @@ fn ui_dump_snapshot(world: &mut World) -> serde_json::Value {
             text,
         });
     }
+
+    // Read filters (`clickable_only` / `text_contains`) — applied before the ancestor fold so
+    // a kept interactive row still folds its kept-label children.
+    rows.retain(|row| filter.keeps(row.text.as_deref(), row.clickable));
 
     // Second pass: fold a non-interactive row away if it sits under a dumped interactive
     // ancestor (the button-label case — its text is already in the button's row).
