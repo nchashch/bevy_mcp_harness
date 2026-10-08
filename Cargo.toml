@@ -1,6 +1,6 @@
 [package]
 name = "bevy_mcp_harness"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps"
 license = "MIT OR Apache-2.0"
@@ -19,7 +19,12 @@ categories = ["game-development", "development-tools::testing"]
 # bevy_dev_tools) as a screenshot `debug_view` parameter. Off by default: it pulls
 # `bevy_dev_tools` (and its render-pipeline deps) into host builds that enable it.
 [features]
-render_debug = ["dep:bevy_dev_tools", "bevy/bevy_dev_tools", "bevy/bevy_core_pipeline", "bevy/bevy_pbr"]
+render_debug = [
+    "dep:bevy_dev_tools",
+    "bevy/bevy_dev_tools",
+    "bevy/bevy_core_pipeline",
+    "bevy/bevy_pbr",
+]
 physics_debug = ["dep:avian3d", "bevy/bevy_gizmos"]
 
 [dependencies]

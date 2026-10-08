@@ -109,9 +109,9 @@ capture; the agent's token-efficient look is a *derived view* served at poll tim
 - The annotator's workflow simplifies to draw-on-the-file: ADR 0008's pixel space and the
   persistent artifact are now the same space. The guide's example no longer multiplies by a
   scale factor.
-- `alignment` was reshaped (unreleased since 0.3.0 — the block is one release old); the
-  top-level `coordinate_scale` moved into `view`, since the file it used to describe is
-  now always 1:1.
+- `alignment` was reshaped before any release carried it (0.3.1 ships the final shape —
+  `png_size` + `view`; no released consumer ever saw the interim top-level `coordinate_scale`
+  form, added and superseded within the same unreleased window).
 - Open: windowed hosts still have no `capture_size` (the harness never reads window state),
   so a windowed, uncropped, downscaled *view* reports `coordinate_scale: null`. Harmless for
   the annotation flow (the file is 1:1 regardless); noted in the guide.

@@ -9,7 +9,7 @@ Before 1.0, a minor version bump (0.2 → 0.3) may contain breaking changes.
 The design history behind these changes lives in
 [`docs/agents/adr/`](docs/agents/adr/README.md).
 
-## [Unreleased]
+## [0.3.1] - 2026-10-09
 
 ### Changed
 
@@ -18,12 +18,30 @@ The design history behind these changes lives in
   The file on disk is
   never cropped or downscaled: `crop` and `max_dimension` now shape only the
   *served view* (`png_base64` — the token-efficient image the agent looks at),
-  applied at poll time to the full-res file. The report/human artifact is the
-  high-res file, and the coordinate tables (`entities`, `game/ui` rects) map
-  onto it 1:1 — annotators draw directly on it, no scaling math. `alignment`
-  reshaped accordingly: `png_size` (the full-res file) + `view` `{size, crop,
-  max_dimension, coordinate_scale}` (the served view's geometry). The annotated
-  capture flow (guide §6a) simplifies to draw-on-the-file.
+  applied at poll time to the full-res file. The agent-facing tool surface is
+  unchanged — this completes 0.3.0's documented "persistent, human-browsable
+  record" intent rather than changing it; scripts that read the screenshots
+  directory directly (report flows, file parsers) see full-resolution frames
+  where they previously saw the downscaled/cropped view. The report/human
+  artifact is the high-res file, and the coordinate tables (`entities`,
+  `game/ui` rects) map onto it 1:1 — annotators draw directly on it, no
+  scaling math.
+
+### Added
+
+- **Self-contained annotation sidecars** — every `<capture>.json` sidecar now
+  carries the per-frame `entities` projection table and an `alignment` block
+  (the file's `png_size`, the `capture_size`, and the served
+  `view` `{size, crop, max_dimension, coordinate_scale}`) beside the PNG path
+  and the `state` snapshot. The per-frame entity table lived only in the poll
+  response before — unrecoverable post-hoc, since `entities_on_screen`
+  projects the *current* frame. A later session, a human, or the report flow
+  can annotate an existing capture with no harness calls; the annotation
+  convention (boxes/labels from the tables, `<name>-annotated.png` beside the
+  untouched original) is documented in the playtest guide §6a and
+  cross-referenced from the bugreport guide's Evidence section.
+- [ADR 0011](docs/agents/adr/0011-always-full-res-captures-and-annotation-workflow.md)
+  records the two-readers split and the annotation workflow.
 
 ## [0.3.0] - 2026-10-08
 
@@ -234,7 +252,8 @@ already folded in.
   and hides the tools that are meaningless without a world render/window),
   and `pub use schemars; pub use serde_json;` re-exports.
 
-[Unreleased]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.1.0...v0.2.0
