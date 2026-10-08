@@ -153,6 +153,13 @@ pub struct McpHarnessConfig {
     /// bootstrap UI camera and the camera-retarget ordering systems, and enables the agent
     /// cursor overlay (on a real desktop the OS cursor is already visible).
     pub offscreen_size: Option<UVec2>,
+    /// A capture target the **host already created** (its own offscreen texture — hosts with
+    /// existing headless camera machinery keep ownership of retargeting, the bootstrap UI
+    /// camera, and clear/order management). The harness wraps this handle in its
+    /// [`OffscreenRenderTarget`] resource and adds only the cursor overlay; screenshots, the
+    /// `game/ui` camera filter, and the mocked pointer all read it. Takes precedence over
+    /// `offscreen_size` (which stays `None` in that case — the host sized its own texture).
+    pub offscreen_target: Option<Handle<Image>>,
     /// Marker mode for render-less headless hosts: no wgpu/Vulkan at all. Screenshots return a
     /// clean error instead of waiting on a capture that can never complete, and
     /// [`headless::shim_camera_computed`] feeds each camera's `Camera.computed.target_info` by
@@ -175,6 +182,7 @@ impl Default for McpHarnessConfig {
             mcp_port: DEFAULT_MCP_PORT,
             screenshots_dir: default_screenshots_dir(brp_port),
             offscreen_size: None,
+            offscreen_target: None,
             no_render: false,
             state_snapshot: None,
             extra_tools: Vec::new(),
@@ -250,48 +258,63 @@ impl Plugin for BevyMcpHarnessPlugin {
             app.add_plugins(RemoteHttpPlugin::default().with_port(config.brp_port));
         }
 
-        // Headless rendering: the offscreen texture, the bootstrap UI camera, and the
-        // camera-retarget/ordering systems that make renderless-window apps actually produce
-        // frames (see `headless.rs`). `init_asset::<Image>` is defensive for hosts that
-        // disabled the render plugins entirely (`ImagePlugin` is what normally registers it) —
-        // guarded, because `init_asset` REPLACES an existing `Assets` store with a fresh one
-        // (divorcing it from handles the server already issued: index-out-of-bounds panics in
+        // Headless rendering, two shapes:
+        // - `offscreen_target`: the host already owns an offscreen texture (and the camera
+        //   retargeting/bootstrap/clear-order machinery around it) — the harness wraps the
+        //   handle in its `OffscreenRenderTarget` resource and adds only the cursor overlay.
+        // - `offscreen_size`: the harness owns the whole headless stack (target, bootstrap UI
+        //   camera, retarget chain).
+        // `init_asset::<Image>` in the owned path is defensive for hosts that disabled the
+        // render plugins entirely (`ImagePlugin` is what normally registers it) — guarded,
+        // because `init_asset` REPLACES an existing `Assets` store with a fresh one (divorcing
+        // it from handles the server already issued: index-out-of-bounds panics in
         // `handle_internal_asset_events`), it is only for genuinely missing stores.
-        if config.offscreen_size.is_some() {
-            if !app.world().contains_resource::<Assets<Image>>() {
-                app.init_asset::<Image>();
+        match config.offscreen_target.clone() {
+            Some(handle) => {
+                app.insert_resource(OffscreenRenderTarget(handle))
+                    // The agent cursor overlay (spawns only while an offscreen target exists).
+                    .add_systems(
+                        Update,
+                        (brp::spawn_agent_cursor_if_headless, brp::update_agent_cursor),
+                    );
             }
-            let size = config.offscreen_size.unwrap();
-            let target = {
-                let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-                OffscreenRenderTarget::new(size.x, size.y, &mut images)
-            };
-            app.insert_resource(target)
-                // A camera for UI that exists before any content camera does — otherwise
-                // bevy_ui has nothing to render onto until the app's own cameras arrive.
-                // `HeadlessUiCameraBootstrap` marks it so `maintain_default_ui_camera` can hand
-                // the `IsDefaultUiCamera` marker back and forth between it and later cameras
-                // instead of letting both hold it at once.
-                .add_systems(
-                    Startup,
-                    |mut commands: Commands| {
-                        commands.spawn((Camera2d, IsDefaultUiCamera, HeadlessUiCameraBootstrap));
-                    },
-                )
-                .add_systems(
-                    Update,
-                    (
-                        headless::retarget_cameras_to_offscreen,
-                        headless::maintain_default_ui_camera,
-                        headless::keep_ui_camera_drawn_last,
+            None if config.offscreen_size.is_some() => {
+                if !app.world().contains_resource::<Assets<Image>>() {
+                    app.init_asset::<Image>();
+                }
+                let size = config.offscreen_size.unwrap();
+                let target = {
+                    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+                    OffscreenRenderTarget::new(size.x, size.y, &mut images)
+                };
+                app.insert_resource(target)
+                    // A camera for UI that exists before any content camera does — otherwise
+                    // bevy_ui has nothing to render onto until the app's own cameras arrive.
+                    // `HeadlessUiCameraBootstrap` marks it so `maintain_default_ui_camera` can hand
+                    // the `IsDefaultUiCamera` marker back and forth between it and later cameras
+                    // instead of letting both hold it at once.
+                    .add_systems(
+                        Startup,
+                        |mut commands: Commands| {
+                            commands.spawn((Camera2d, IsDefaultUiCamera, HeadlessUiCameraBootstrap));
+                        },
                     )
-                        .chain(),
-                )
-                // The agent cursor overlay (spawns only while an offscreen target exists).
-                .add_systems(
-                    Update,
-                    (brp::spawn_agent_cursor_if_headless, brp::update_agent_cursor),
-                );
+                    .add_systems(
+                        Update,
+                        (
+                            headless::retarget_cameras_to_offscreen,
+                            headless::maintain_default_ui_camera,
+                            headless::keep_ui_camera_drawn_last,
+                        )
+                            .chain(),
+                    )
+                    // The agent cursor overlay (spawns only while an offscreen target exists).
+                    .add_systems(
+                        Update,
+                        (brp::spawn_agent_cursor_if_headless, brp::update_agent_cursor),
+                    );
+            }
+            None => {}
         }
 
         if config.no_render {
