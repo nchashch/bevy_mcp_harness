@@ -351,15 +351,16 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         None => None,
     };
     // Optional render-debug view (depth / normals / motion vectors / deferred buffers — the
-    // bevy_dev_tools F1 overlay) for this capture only. Applied to the capture camera (the
-    // `camera` param, else the highest-order camera on the capture target / primary window)
-    // and restored after the capture. Requires the `render_debug` cargo feature.
+    // bevy_dev_tools F1 overlay) for this capture only.
     #[cfg(feature = "render_debug")]
     let debug_mode = params
         .0
         .as_ref()
         .and_then(|p| p.get("debug_view"))
         .and_then(serde_json::Value::as_str)
+        // `"wireframe"` is handled separately (global `WireframeConfig` toggle below) —
+        // `parse_mode` would reject it as an unknown overlay mode.
+        .filter(|name| *name != "wireframe")
         .map(render_debug::parse_mode)
         .transpose()?;
     #[cfg(not(feature = "render_debug"))]
@@ -448,6 +449,41 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .get_resource::<CaptureTarget>()
         .map(|target| Screenshot(bevy::camera::RenderTarget::Image(target.0.clone().into())))
         .unwrap_or_else(Screenshot::primary_window);
+
+    // `debug_view: "wireframe"` is a separate mechanism (global `WireframeConfig` toggle in
+    // bevy_pbr, not the bevy_dev_tools F1 overlay) — handled before the overlay modes.
+    #[cfg(feature = "render_debug")]
+    if params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("debug_view"))
+        .and_then(serde_json::Value::as_str)
+        == Some("wireframe")
+    {
+        let previous_config =
+            world.get_resource::<bevy::pbr::wireframe::WireframeConfig>().cloned();
+        world.insert_resource(bevy::pbr::wireframe::WireframeConfig {
+            global: true,
+            default_color: Color::srgb(0.0, 1.0, 0.5),
+            ..Default::default()
+        });
+        world.insert_resource(render_debug::PendingWireframeCapture {
+            path: path.clone(),
+            crop,
+            max_dimension,
+            previous_config,
+            frames_since_apply: 0,
+        });
+        return Ok(json!({
+            "status": "capturing",
+            "poll": "game/screenshot/get",
+            "path": path.display().to_string(),
+            "crop": crop,
+            "max_dimension": max_dimension,
+            "debug_view": "wireframe",
+            "note": "wireframe applied deferred — the first game/screenshot/get poll may return ready:false for a few hundred ms while the wireframe pipeline compiles",
+        }));
+    }
 
     // A `debug_view` capture is deferred: the overlay and its prepass pipelines compile on
     // first use, so the runner applies the overlay and spawns the capture only after a few
@@ -963,6 +999,77 @@ pub(crate) mod render_debug {
             None => entity.remove::<RenderDebugOverlay>(),
         };
         commands.remove_resource::<RenderDebugRestore>();
+    }
+
+    /// A deferred wireframe capture: `WireframeConfig { global: true }` is inserted at
+    /// request time (extracted to the render world on the next frame), and the screenshot
+    /// entity spawns [`WARMUP_FRAMES`] frames later (the wireframe pipeline compiles on
+    /// first use — same warm-up race as the overlay).
+    #[derive(Resource)]
+    pub(crate) struct PendingWireframeCapture {
+        pub path: PathBuf,
+        pub crop: Option<[u32; 4]>,
+        pub max_dimension: Option<u32>,
+        pub previous_config: Option<bevy::pbr::wireframe::WireframeConfig>,
+        pub frames_since_apply: u32,
+    }
+
+    /// The wireframe config state to restore after a wireframe capture.
+    #[derive(Resource)]
+    pub(crate) struct WireframeRestore {
+        pub previous_config: Option<bevy::pbr::wireframe::WireframeConfig>,
+    }
+
+    /// Runs every `Update`: spawns the capture after the wireframe pipeline has warmed up,
+    /// then restores the previous config.
+    pub(crate) fn wireframe_runner(world: &mut World) {
+        let Some(mut pending) = world.get_resource_mut::<PendingWireframeCapture>() else {
+            return;
+        };
+        pending.frames_since_apply += 1;
+        if pending.frames_since_apply < WARMUP_FRAMES {
+            return;
+        }
+        let path = pending.path.clone();
+        let crop = pending.crop;
+        let max_dimension = pending.max_dimension;
+        let previous_config = pending.previous_config.clone();
+        drop(pending);
+
+        world.insert_resource(WireframeRestore { previous_config });
+        world
+            .spawn(Screenshot(bevy::camera::RenderTarget::Image(
+                world
+                    .get_resource::<CaptureTarget>()
+                    .expect("wireframe only runs when a CaptureTarget exists")
+                    .0
+                    .clone()
+                    .into(),
+            )))
+            .observe(save_encoded_to_disk(path, crop, max_dimension))
+            .observe(wireframe_restore);
+        world.remove_resource::<PendingWireframeCapture>();
+    }
+
+    /// Restores the previous `WireframeConfig` after a wireframe capture. The pipelines are
+    /// warm by capture time (the capture was deferred past their warm-up).
+    pub(crate) fn wireframe_restore(
+        _captured: On<ScreenshotCaptured>,
+        restore: Option<Res<WireframeRestore>>,
+        mut commands: Commands,
+    ) {
+        let Some(restore) = restore else {
+            return;
+        };
+        match &restore.previous_config {
+            Some(previous) => {
+                commands.insert_resource(previous.clone());
+            }
+            None => {
+                commands.remove_resource::<bevy::pbr::wireframe::WireframeConfig>();
+            }
+        }
+        commands.remove_resource::<WireframeRestore>();
     }
 }
 

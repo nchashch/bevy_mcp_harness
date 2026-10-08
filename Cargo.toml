@@ -19,7 +19,7 @@ categories = ["game-development", "development-tools::testing"]
 # bevy_dev_tools) as a screenshot `debug_view` parameter. Off by default: it pulls
 # `bevy_dev_tools` (and its render-pipeline deps) into host builds that enable it.
 [features]
-render_debug = ["dep:bevy_dev_tools", "bevy/bevy_dev_tools", "bevy/bevy_core_pipeline"]
+render_debug = ["dep:bevy_dev_tools", "bevy/bevy_dev_tools", "bevy/bevy_core_pipeline", "bevy/bevy_pbr"]
 
 [dependencies]
 # `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`

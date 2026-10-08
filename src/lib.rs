@@ -508,7 +508,14 @@ impl Plugin for BevyMcpHarnessPlugin {
             if !app.is_plugin_added::<bevy_dev_tools::render_debug::RenderDebugOverlayPlugin>() {
                 app.add_plugins(bevy_dev_tools::render_debug::RenderDebugOverlayPlugin);
             }
+            // Wireframe rendering (bevy_pbr) — same render_debug feature gate; NOT part of
+            // DefaultPlugins, so it's opt-in. `debug_view: "wireframe"` toggles
+            // `WireframeConfig { global: true }` for the capture and restores after.
+            if !app.is_plugin_added::<bevy::pbr::wireframe::WireframePlugin>() {
+                app.add_plugins(bevy::pbr::wireframe::WireframePlugin::default());
+            }
             app.add_systems(Update, brp::render_debug::runner);
+            app.add_systems(Update, brp::render_debug::wireframe_runner);
         }
 
         app.insert_resource(config.clone());
