@@ -5,9 +5,10 @@ edition = "2024"
 description = "Localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/nchashch/bevy_mcp_harness"
+documentation = "https://docs.rs/bevy_mcp_harness"
 keywords = ["bevy", "mcp", "testing", "playtesting", "gamedev"]
 categories = ["game-development", "development-tools::testing"]
-# repository/documentation: set to the crate's public URL before the first publish.
 
 [dependencies]
 # `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`
