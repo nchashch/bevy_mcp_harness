@@ -517,8 +517,11 @@ impl Plugin for BevyMcpHarnessPlugin {
             // Physics debug views (`physics_debug` feature): Avian3D collider gizmos via
             // bevy_gizmos. The plugin adds PostUpdate systems that draw colliders/AABBs/contacts
             // when `PhysicsGizmos.enabled` is true; `debug_view: "physics"` toggles the config.
+            // Guarded: p19's own UI code already adds it (the game uses Avian3D's debug render).
             #[cfg(feature = "physics_debug")]
-            app.add_plugins(avian3d::debug_render::PhysicsDebugPlugin);
+            if !app.is_plugin_added::<avian3d::debug_render::PhysicsDebugPlugin>() {
+                app.add_plugins(avian3d::debug_render::PhysicsDebugPlugin);
+            }
             app.add_systems(Update, brp::render_debug::runner);
             app.add_systems(Update, brp::render_debug::wireframe_runner);
         }

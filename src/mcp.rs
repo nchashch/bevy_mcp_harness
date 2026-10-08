@@ -537,11 +537,13 @@ pub struct ScreenshotParams {
     /// edge (aspect preserved, clamped 64..=4096). Use ~640 for overview checks; omit for
     /// full-resolution detail reads.
     pub max_dimension: Option<u32>,
-    /// Optional render-debug view (requires the host to enable the harness's `render_debug`
-    /// feature): `depth`, `normals`, `motion_vectors`, `deferred`, `deferred_base_color`,
-    /// `deferred_emissive`, `deferred_metallic_roughness`, `depth_pyramid` — the same views
-    /// F1 cycles in normal play, rendered into this one capture.
-    pub debug_view: Option<String>,
+    /// Optional render-debug views (requires the host to enable the harness's `render_debug`
+    /// feature): a list of mode names to capture. Each mode renders into a separate PNG.
+    /// Valid names: `depth`, `normals`, `motion_vectors`, `wireframe`, `deferred`,
+    /// `deferred_base_color`, `deferred_emissive`, `deferred_metallic_roughness`,
+    /// `depth_pyramid` — the same views F1 cycles in normal play. All captures show the
+    /// same scene state (taken within a few frames of each other).
+    pub debug_views: Option<Vec<String>>,
 }
 
 /// The tool definitions live in this block; the handlers proxy to BRP.
@@ -580,11 +582,11 @@ impl GameTools {
     #[rmcp::tool(description = "Capture a screenshot of the game. Returns the PNG as image content PLUS the game's ground-truth state as JSON text (same payload as game_state), so you never need to read numbers off the HUD. Optional `crop` [x,y,w,h] captures just a region (read the rect off game/ui first) — cheaper and sharper than a full frame. Optional `max_dimension` (64..=4096) downscales the encoded PNG to fit that many pixels on the long edge — use ~640 for overview checks (did it render, is the menu up) to cut vision tokens ~4×; omit for full-resolution detail reads. A visible crosshair marks your mocked mouse cursor when running headless (red = idle, yellow = hovering, white = left held). If the response says unchanged:true, the pixels are IDENTICAL to the last image you were served — do not ask for it again; read the included state instead.")]
     async fn screenshot(
         &self,
-        Parameters(ScreenshotParams { label, crop, max_dimension, debug_view }): Parameters<ScreenshotParams>,
+        Parameters(ScreenshotParams { label, crop, max_dimension, debug_views }): Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut params = json!({});
+        let mut base_params = json!({});
         if let Some(label) = label {
-            params["label"] = json!(label);
+            base_params["label"] = json!(label);
         }
         if let Some(crop) = crop {
             if crop.len() != 4 || crop.iter().any(|v| !v.is_finite() || *v < 0.0) {
@@ -593,47 +595,77 @@ impl GameTools {
                     None,
                 ));
             }
-            params["crop"] = json!(crop);
+            base_params["crop"] = json!(crop);
         }
         if let Some(max_dimension) = max_dimension {
-            params["max_dimension"] = json!(max_dimension.clamp(64, 4096));
+            base_params["max_dimension"] = json!(max_dimension.clamp(64, 4096));
         }
-        if let Some(debug_view) = debug_view.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            params["debug_view"] = json!(debug_view);
-        }
-        self.brp(&self.method("screenshot"), params).await?;
-        for _ in 0..40 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let result = self.brp(&self.method("screenshot/get"), json!({})).await?;
-            if result.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
-                continue;
-            }
-            let state = result.get("state").cloned().unwrap_or(json!(null));
-            let path = result.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-            let state_json = serde_json::to_string_pretty(&json!({
-                "path": path,
-                "state": state,
-            }))
-            .map_err(|err| rmcp::ErrorData::internal_error(format!("{err}"), None))?;
-            if result.get("unchanged").and_then(serde_json::Value::as_bool) == Some(true) {
-                return Ok(CallToolResult::success(vec![
-                    ContentBlock::text(format!(
-                        "unchanged: the newest capture has PIXEL-IDENTICAL content to the last image you were served — it is not attached again.\n{state_json}"
-                    )),
-                ]));
-            }
-            let png_base64 = result
-                .get("png_base64")
+
+        let views: Vec<String> = debug_views
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut blocks: Vec<ContentBlock> = Vec::new();
+        for view in &views {
+            let mut params = base_params.clone();
+            params["debug_view"] = json!(view);
+            let start = self.brp(&self.method("screenshot"), params).await?;
+            let expected_path = start
+                .get("path")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| rmcp::ErrorData::internal_error("screenshot missing data", None))?;
-            let mut blocks = vec![ContentBlock::image(png_base64.to_string(), "image/png")];
-            blocks.push(ContentBlock::text(state_json));
-            return Ok(CallToolResult::success(blocks));
+                .unwrap_or_default()
+                .to_owned();
+            let mut png_base64 = None;
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let result = self.brp(&self.method("screenshot/get"), json!({})).await?;
+                if result.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
+                    continue;
+                }
+                let returned_path = result
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if returned_path != expected_path {
+                    continue;
+                }
+                png_base64 = result
+                    .get("png_base64")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|s| s.to_owned());
+                break;
+            }
+            let Some(png) = png_base64 else {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!("screenshot timed out for debug_view {view:?} (is the game rendering?)"),
+                    None,
+                ));
+            };
+            blocks.push(ContentBlock::text(format!("debug_view: {view}")));
+            blocks.push(ContentBlock::image(png, "image/png"));
         }
-        Err(rmcp::ErrorData::internal_error(
-            "screenshot timed out (is the game rendering?)",
-            None,
-        ))
+
+        if blocks.is_empty() {
+            self.brp(&self.method("screenshot"), base_params).await?;
+            for _ in 0..60 {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let result = self.brp(&self.method("screenshot/get"), json!({})).await?;
+                if result.get("ready").and_then(serde_json::Value::as_bool) == Some(true) {
+                    let png_base64 = result
+                        .get("png_base64")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|s| s.to_owned());
+                    if let Some(png) = png_base64 {
+                        blocks.push(ContentBlock::image(png, "image/png"));
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(CallToolResult::success(blocks))
     }
 
     /// Reports this harness's launch configuration: mode flags and surface ports.

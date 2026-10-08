@@ -360,7 +360,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .and_then(serde_json::Value::as_str)
         // `"wireframe"` is handled separately (global `WireframeConfig` toggle below) —
         // `parse_mode` would reject it as an unknown overlay mode.
-        .filter(|name| *name != "wireframe")
+        .filter(|name| *name != "wireframe" && *name != "physics")
         .map(render_debug::parse_mode)
         .transpose()?;
     #[cfg(not(feature = "render_debug"))]
@@ -739,7 +739,7 @@ pub(crate) fn entities_on_screen_data(
     ), ()>();
 
     let mut entries: Vec<(f32, serde_json::Value)> = Vec::new();
-    for (entity, aabb, _global_transform, name, inherited_vis, view_vis) in query.iter(world) {
+    for (entity, aabb, global_transform, name, inherited_vis, view_vis) in query.iter(world) {
         if inherited_vis.is_some_and(|vis| !vis.get()) {
             continue;
         }
@@ -747,15 +747,18 @@ pub(crate) fn entities_on_screen_data(
             continue;
         }
 
-        // Project the AABB center to screenspace.
+        // Project the AABB center to screenspace. The `Aabb` is in the entity's LOCAL
+        // space — transform it to world space via the entity's GlobalTransform first.
+        let world_center = global_transform.transform_point(Vec3::from(aabb.center));
         let Ok(center_2d) =
-            camera.world_to_viewport(&camera_transform, Vec3::from(aabb.center))
+            camera.world_to_viewport(&camera_transform, world_center)
         else {
             continue;
         };
 
-        // Project all 8 AABB corners to compute the 2D bounding box. An axis-aligned
-        // box viewed from any angle needs all 8 corners projected to get the exact 2D bbox.
+        // Project all 8 AABB corners to compute the 2D bounding box. Each corner is
+        // transformed from local space to world space via the entity's GlobalTransform
+        // (so rotated entities get correctly-projected corners).
         let mut min_x = f32::MAX;
         let mut min_y = f32::MAX;
         let mut max_x = f32::MIN;
@@ -764,12 +767,13 @@ pub(crate) fn entities_on_screen_data(
         for sx in [0.0, 1.0] {
             for sy in [0.0, 1.0] {
                 for sz in [0.0, 1.0] {
-                    let corner = Vec3::new(
+                    let local_corner = Vec3::new(
                         aabb.center.x + aabb.half_extents.x * (sx * 2.0 - 1.0),
                         aabb.center.y + aabb.half_extents.y * (sy * 2.0 - 1.0),
                         aabb.center.z + aabb.half_extents.z * (sz * 2.0 - 1.0),
                     );
-                    if let Ok(pos) = camera.world_to_viewport(&camera_transform, corner) {
+                    let world_corner = global_transform.transform_point(local_corner);
+                    if let Ok(pos) = camera.world_to_viewport(&camera_transform, world_corner) {
                         any_in_front = true;
                         min_x = min_x.min(pos.x);
                         min_y = min_y.min(pos.y);
@@ -850,11 +854,12 @@ pub(crate) fn entities_on_screen_method(params: In<Option<serde_json::Value>>, w
     }))
 }
 
-/// Resolves the highest-order active Camera entity and projects all visible `Aabb` entities
-/// through it. Returns a JSON array (empty on error).
+/// Resolves the highest-order active Camera3d entity (the one rendering 3D content — UI
+/// cameras have orthographic projections that can't project 3D world positions) and projects
+/// all visible `Aabb` entities through it. Returns a JSON array (empty on error).
 fn screenshot_get_entities(world: &mut World) -> serde_json::Value {
     let mut best: Option<(Entity, isize)> = None;
-    let mut query = world.query_filtered::<(Entity, &Camera), ()>();
+    let mut query = world.query_filtered::<(Entity, &Camera), With<Camera3d>>();
     for (entity, camera) in query.iter(world) {
         if camera.is_active && best.is_none_or(|(_, order)| camera.order > order) {
             best = Some((entity, camera.order));
