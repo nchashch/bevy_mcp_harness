@@ -2,8 +2,11 @@
 
 Guidance for AI coding agents working in this repository. This file describes the **current state**
 of the code only — history and rationale live in the git log and in the load-bearing doc comments
-(`src/headless.rs`, `src/brp.rs`). When a change alters behavior described here, update this file
-in the same change; do not append changelog entries.
+(`src/headless.rs`, `src/brp.rs`), and in [`docs/agents/adr/`](docs/agents/adr/) (design
+decisions — the extraction from prototype_19, the generalization boundary, headless-rendering
+ownership, the bundled guides, the extension ergonomics, and the pre-flight precondition
+design). When a change alters behavior described here, update this file in the same change;
+do not append changelog entries.
 
 ## Rules
 
