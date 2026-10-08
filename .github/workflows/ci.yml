@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Debuginfo is the bulk of a Bevy debug build's target/ size; CI only compiles and runs the
+  # doctests, so skip it and keep the target/ cache well under rust-cache's 10 GB cap.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  # The crate's own boundary check: the lib must compile and test against the minimal Bevy
+  # feature set (see Cargo.toml — `default-features = false`) with NO system libraries
+  # installed. A host embedding the harness into a headless server must not inherit
+  # winit/Wayland; this job fails the moment a feature creeps back into the default set.
+  lib:
+    name: Lib (minimal Bevy, no system deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Guard — the lib must not pull winit/Wayland
+        run: |
+          if cargo tree -e normal -i wayland-sys; then
+            echo "::error::wayland-sys is in the lib's dependency graph — a feature crept back into the default set"
+            exit 1
+          fi
+          if cargo tree -e normal -i winit; then
+            echo "::error::winit is in the lib's dependency graph — a feature crept back into the default set"
+            exit 1
+          fi
+
+      - name: Test (unit + doctests)
+        run: cargo test --lib --doc
+
+      - name: Clippy (lib)
+        run: cargo clippy --lib -- -D warnings
+
+      - name: Doc (no warnings)
+        run: cargo doc --no-deps
+
+  # Everything that touches the examples: they build against the full Bevy feature set
+  # (dev-dependency — the `--render` branch composes `DefaultPlugins`), which needs the Bevy
+  # Linux system libraries. Also the packaging gate: the published crate must compile
+  # standalone (this catches, among other things, `include_str!` files missing from the
+  # package).
+  all-targets:
+    name: Examples, tests, clippy, publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Bevy/linux compile-time)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libudev-dev libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (all targets)
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy (all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Publish dry-run (standalone compile, package contents)
+        run: cargo publish --dry-run
