@@ -81,7 +81,7 @@ fn main() {
     )))
     .add_plugins(BevyMcpHarnessPlugin {
         config: McpHarnessConfig {
-            offscreen_size: Some(DEFAULT_OFFSCREEN_SIZE),
+            offscreen: bevy_mcp_harness::OffscreenMode::Owned(DEFAULT_OFFSCREEN_SIZE),
             no_render: !render,
             // Game-specific MCP tool served alongside the harness's built-ins (see
             // `register_game_methods` below for the BRP method it proxies to).

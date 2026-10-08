@@ -1,5 +1,9 @@
 # Skill: Filing bug reports
 
+> Note: file paths in these guides (`docs/agents/…`, `crates/client/…`) refer to the
+> **bevy_mcp_harness repository**, not the app being tested — the guides are served from the
+> harness binary itself.
+
 Read this before filing a bug report. Bug reports are the project's permanent
 defect ledger: every reproducible flaw, regression, misbehavior, or design-level
 hazard gets one Markdown file, numbered, dated, pinned to the exact code state it

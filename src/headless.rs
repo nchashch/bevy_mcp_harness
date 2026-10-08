@@ -14,6 +14,24 @@ use bevy::ui::IsDefaultUiCamera;
 #[derive(Resource, Clone)]
 pub struct OffscreenRenderTarget(pub Handle<Image>);
 
+/// The harness-internal view of the capture target, present in both offscreen modes:
+/// `Owned` (the harness created the target) and `HostManaged` (the host created its own
+/// texture and handed the handle via config — the public [`OffscreenRenderTarget`] resource
+/// stays the host's in that mode). All harness systems read this, never the public resource.
+#[derive(Resource, Clone)]
+pub(crate) struct CaptureTarget(pub Handle<Image>);
+
+impl CaptureTarget {
+    pub(crate) fn from_offscreen(target: &OffscreenRenderTarget) -> Self {
+        Self(target.0.clone())
+    }
+
+    /// The target's current size in pixels, when its image asset exists.
+    pub(crate) fn size(&self, images: &Assets<Image>) -> Option<UVec2> {
+        images.get(&self.0).map(|image| image.size())
+    }
+}
+
 impl OffscreenRenderTarget {
     pub fn new(width: u32, height: u32, images: &mut Assets<Image>) -> Self {
         let mut image = Image::new_target_texture(width, height, TextureFormat::Rgba8UnormSrgb, None);

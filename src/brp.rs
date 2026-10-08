@@ -18,7 +18,7 @@ use bevy::text::TextSpan;
 use bevy::ui::{ComputedUiTargetCamera, UiGlobalTransform, UiStack};
 use serde_json::json;
 
-use crate::headless::OffscreenRenderTarget;
+use crate::headless::CaptureTarget;
 use crate::{McpHarnessConfig, NoRenderMode};
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ pub(crate) fn client_info_method(_params: In<Option<serde_json::Value>>, world: 
             "McpHarnessConfig resource missing (was BevyMcpHarnessPlugin built?)",
         ));
     };
-    Ok(json!({
+    let mut payload = json!({
         "no_render": config.no_render,
         "brp_port": config.brp_port,
         "mcp_port": config.mcp_port,
@@ -69,15 +69,20 @@ pub(crate) fn client_info_method(_params: In<Option<serde_json::Value>>, world: 
         "screenshots_available": !config.no_render,
         "rendering": !config.no_render,
         "target_size": world
-            .get_resource::<OffscreenRenderTarget>()
+            .get_resource::<CaptureTarget>()
             .and_then(|target| {
                 world
                     .get_resource::<Assets<Image>>()
                     .and_then(|images| images.get(&target.0))
                     .map(|image| vec![image.size().x, image.size().y])
             }),
-    })
-    .into())
+    });
+    // The host's game-specific mode flags (vr, headless_render, …), merged under one key so
+    // they can't collide with the generic fields.
+    if let Some(host) = config.client_info_host.clone() {
+        payload["host"] = host(world);
+    }
+    Ok(payload.into())
 }
 
 /// `game/cameras` — lists every camera: entity id (usable as `game/screenshot`'s `camera`
@@ -247,7 +252,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
     // Headless (offscreen target configured): the cameras render into the offscreen texture —
     // capture THAT. Windowed: capture the primary window.
     let capture_target = world
-        .get_resource::<OffscreenRenderTarget>()
+        .get_resource::<CaptureTarget>()
         .map(|target| Screenshot(bevy::camera::RenderTarget::Image(target.0.clone().into())))
         .unwrap_or_else(Screenshot::primary_window);
     world
@@ -481,7 +486,7 @@ const CURSOR_THICK: f32 = 3.0;
 /// target goes away. Polling rather than an observer because the resource may be inserted after
 /// plugin build, matching the "can appear at any time" precedent.
 pub(crate) fn spawn_agent_cursor_if_headless(
-    offscreen: Option<Res<OffscreenRenderTarget>>,
+    offscreen: Option<Res<CaptureTarget>>,
     existing: Query<Entity, With<AgentCursorRoot>>,
     mut commands: Commands,
 ) {
@@ -544,7 +549,7 @@ pub(crate) fn spawn_agent_cursor_if_headless(
 /// same factor `ui_layout_system` derived, so the overlay lands exactly on the pointer
 /// whatever the scale.
 pub(crate) fn update_agent_cursor(
-    offscreen: Option<Res<OffscreenRenderTarget>>,
+    offscreen: Option<Res<CaptureTarget>>,
     images: Option<Res<Assets<Image>>>,
     ui_scale: Res<UiScale>,
     pointers: Query<(
@@ -611,7 +616,7 @@ pub(crate) fn update_agent_cursor(
 /// The [`ui_dump_method`] payload. See that function's doc comment for the semantics.
 fn ui_dump_snapshot(world: &mut World) -> serde_json::Value {
     let offscreen = world
-        .get_resource::<OffscreenRenderTarget>()
+        .get_resource::<CaptureTarget>()
         .map(|target| target.0.clone());
 
     // Headless: only nodes whose UI camera renders into the capture target. The vec is empty
@@ -650,6 +655,22 @@ fn ui_dump_snapshot(world: &mut World) -> serde_json::Value {
     // reason about occlusion ("a later row draws on top of an earlier one").
     let stack = world.resource::<UiStack>().uinodes.clone();
 
+    // The host's clickable convention (e.g. an HTML-markup UI whose buttons declare
+    // `data-on-click`-style hooks instead of `bevy_ui::Interaction`), evaluated up front over
+    // the stack — the hook takes `&World`, which the per-row query pass below would otherwise
+    // conflict with.
+    let extra_clickable: std::collections::HashSet<Entity> = match world
+        .get_resource::<McpHarnessConfig>()
+        .and_then(|config| config.clickable.clone())
+    {
+        Some(clickable) => stack
+            .iter()
+            .copied()
+            .filter(|&entity| clickable(world, entity))
+            .collect(),
+        None => Default::default(),
+    };
+
     let mut nodes = world.query_filtered::<(
         &ComputedNode,
         &UiGlobalTransform,
@@ -668,8 +689,9 @@ fn ui_dump_snapshot(world: &mut World) -> serde_json::Value {
 
     // First pass: raw rows in stack order. A row is interactive iff it carries a `bevy_ui`
     // `Interaction` — the one interaction convention every bevy UI surface uses (the focus
-    // system only updates nodes that have it). Pressed/hovered come from `Interaction` itself,
-    // hovered also from picking's own `Hovered` component.
+    // system only updates nodes that have it) — or the host's `clickable` hook claims it.
+    // Pressed/hovered come from `Interaction` itself, hovered also from picking's own
+    // `Hovered` component.
     struct Row {
         entity: Entity,
         rect: [i32; 4],
@@ -703,7 +725,7 @@ fn ui_dump_snapshot(world: &mut World) -> serde_json::Value {
         if angle.abs() > 0.01 {
             continue;
         }
-        let clickable = interaction.is_some();
+        let clickable = interaction.is_some() || extra_clickable.contains(&entity);
         let interaction = if matches!(interaction, Some(bevy::ui::Interaction::Pressed)) {
             Some("Pressed".to_owned())
         } else if matches!(interaction, Some(bevy::ui::Interaction::Hovered))
@@ -1052,7 +1074,7 @@ const AGENT_POINTER: bevy::picking::pointer::PointerId = bevy::picking::pointer:
 /// otherwise the primary window (when there is one). `None` in a window-less app with no
 /// offscreen target — there is nowhere to point.
 fn pointer_target(world: &mut World) -> Option<bevy::camera::NormalizedRenderTarget> {
-    if let Some(target) = world.get_resource::<OffscreenRenderTarget>() {
+    if let Some(target) = world.get_resource::<CaptureTarget>() {
         return Some(bevy::camera::NormalizedRenderTarget::Image(
             target.0.clone().into(),
         ));

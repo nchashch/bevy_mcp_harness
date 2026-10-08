@@ -8,6 +8,8 @@ delete the entry.
 
 ## 1. Host-owned offscreen targets need manual plumbing ✅ fixed
 
+**Status: FIXED — `McpHarnessConfig::offscreen: OffscreenMode` (`HostManaged(handle)` seeds only the harness-internal `CaptureTarget`; no public duplicate). Residual gone: the host's resource is the only public one.**
+
 p19's headless camera machinery (`OffscreenRenderTarget`, `NoRenderMode`, the
 retarget/bootstrap/clear-order systems) is **not** dev-only — the render-less
 headless branch runs regardless of the `dev-tools` feature, so it cannot move
@@ -26,6 +28,8 @@ copy.
 
 ## 2. `no_render`/shim duplication when the host owns the target ⚠️ open
 
+**Status: FIXED — the `target_info` shim is added only in `OffscreenMode::Owned`; a `HostManaged` host feeds its own.**
+
 With `offscreen_target` + `no_render`, both the host's and the harness's
 `shim_camera_computed` run (p19 keeps its own because it must work without the
 harness). Benign today — both write the same `computed.target_info` — but two
@@ -36,6 +40,8 @@ shim (document that the host owns `target_info` feeding) or expose the shim as a
 public fn the host can call instead of re-owning it.
 
 ## 3. Screenshots-dir isolation logic is private ⚠️ open
+
+**Status: FIXED — `isolated_screenshots_dir(base, brp_port)` is public; `default_screenshots_dir` uses it. p19 calls it with its `docs/agents/playtests/dist/screenshots` base.**
 
 `default_screenshots_dir` (base dir + per-client `client-<port>` isolation
 under fleet testing) is private. p19 had to reimplement it to keep its own
@@ -49,6 +55,8 @@ isolation-always-applied.
 
 ## 4. `from_env` hardcodes client defaults ⚠️ open
 
+**Status: FIXED — `from_env_with_defaults(brp_default, mcp_default)`; p19's server uses it with 15701/15711.**
+
 `McpHarnessConfig::from_env` reads `--brp-port/--mcp-port/--no-render` with the
 client defaults (15702/15710). A server binary (p19: 15701/15711) can't use it —
 it re-implements flag parsing. Also `from_env` doesn't read `offscreen_*`
@@ -58,6 +66,8 @@ it re-implements flag parsing. Also `from_env` doesn't read `offscreen_*`
 `FromEnv::builder().brp_default(..)`.
 
 ## 5. Custom BRP method registration is raw bevy_remote plumbing ✅ acceptable, revisit
+
+**Status: FIXED — `register_game_method(app, name, system)` (one line per method, warns when `RemoteMethods` is missing). p19 registers its five methods through it.**
 
 Registering one method is three lines of `register_system` +
 `RemoteMethods::insert(RemoteMethodSystemId::Instant(..))`, and p19 repeated it
@@ -69,6 +79,8 @@ after the harness added `RemotePlugin`).
 
 ## 6. Hosts need `schemars`/`serde` as direct deps for `HarnessTool` args ⚠️ open
 
+**Status: PARTIALLY FIXED — `pub use schemars; pub use serde_json;` added (non-derive use). Derive macros expand to `schemars::` crate paths, so derive-based hosts still need a direct `schemars` dependency (documented on the re-export and in p19's Cargo.toml).**
+
 `HarnessTool::new` is generic over `P: DeserializeOwned + JsonSchema`, so the
 host's `Cargo.toml` needs `schemars` (p19 kept it as an optional dep just for
 one args struct).
@@ -77,6 +89,8 @@ one args struct).
 (`pub use schemars;`) so hosts use `bevy_mcp_harness::schemars::JsonSchema`.
 
 ## 7. Built-in `game/*` naming is game-flavored for non-game hosts ⚠️ open
+
+**Status: FIXED — `method_prefix` (p19's server now serves `server/state`, matching its old API) and `disabled_tools` (server hides screenshot/ui_tree/input mocks; hidden tools vanish from tools/list and fail on call).**
 
 The p19 server now serves `game/state` containing a *server* snapshot — the
 name is wrong-ish, and `game/screenshot`/`game/mouse`/`game/gamepad` are
@@ -89,6 +103,8 @@ confusingly in `tools/list`).
 
 ## 8. `game/client_info` payload is fixed ✅ worked around, revisit
 
+**Status: FIXED — `client_info_host: Option<StateSnapshotFn>` merged under a `"host"` key; p19's mode flags (mcp/vr/headless_render/no_common_assets) moved back there from the state snapshot.**
+
 p19's old `client_info` carried game-specific mode flags (`vr`,
 `headless_render`, `no_common_assets`, `mcp`). The harness's payload is
 closed, so the migration folded those into the `game/state` snapshot under
@@ -98,6 +114,8 @@ closed, so the migration folded those into the `game/state` snapshot under
 payload (e.g. a second hook, or reuse `state_snapshot`'s output under a key).
 
 ## 9. `clickable` detection is `Interaction`-only — markup-driven UIs dump as non-clickable ⚠️ open
+
+**Status: FIXED — `clickable: Option<ClickableFn>` (`fn(&World, Entity) -> bool`), evaluated over the UI stack before the dump pass. p19 registers the bevy_markup `data-on-click` signal check; verified live: all four markup menu buttons now dump `clickable: true`.**
 
 Observed live in the p19 migration: the bevy_markup main menu's "Connect"
 button dumps **without** `clickable` (18 nodes, no flags) because p19's UI
@@ -113,6 +131,8 @@ common conventions in addition to `Interaction` (behind a cargo feature for
 bevy_markup so the harness doesn't depend on it).
 
 ## 10. Minor: `#[tool_handler]`-style ergonomics, docs paths
+
+**Status: FIXED — `HarnessTool` `Err(String)` now returns `CallToolResult::error` (`isError: true` content; verified: inject_input without a player reports `isError: true` + the message). Guides carry a preface noting their paths refer to the harness repository.**
 
 - `HarnessTool` callbacks returning `Err(String)` surface as JSON-RPC
   `internal_error` (code -32603) rather than MCP `isError: true` content —

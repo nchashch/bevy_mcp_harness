@@ -46,11 +46,18 @@ Three layers:
    read the playtesting playbook with zero setup: `read_guide` with no arguments returns the
    index; `{"guide":"playtest","section":"6"}` returns one section.
 
-Headless support (`McpHarnessConfig::offscreen_size`): every camera is retargeted into a
-shared offscreen texture (with the UI-camera ordering invariant maintained), captures read that
-texture, and the agent cursor overlay renders the mocked pointer's position/hover/press state
-into captures. `no_render` additionally runs with no wgpu/Vulkan at all — UI layout, `game/ui`,
-hover, and clicks still work; screenshots return a clean error.
+Headless support (`McpHarnessConfig::offscreen`): `OffscreenMode::Owned(size)` — every camera
+is retargeted into a shared offscreen texture (with the UI-camera ordering invariant
+maintained), captures read that texture, and the agent cursor overlay renders the mocked
+pointer's position/hover/press state into captures. `OffscreenMode::HostManaged(handle)` is
+for hosts with existing headless camera machinery: they keep their own target/resource and the
+harness adds only the cursor overlay. `no_render: true` additionally runs with no wgpu/Vulkan
+at all — UI layout, `game/ui`, hover, and clicks still work; screenshots return a clean error.
+
+Customization beyond the config fields (`state_snapshot`, `client_info_host` for game-specific
+mode flags, `clickable` for non-`Interaction` UI conventions, `extra_tools`, `method_prefix`
+for non-game apps, `disabled_tools`, `register_game_method`): see `AGENTS.md` and the crate
+docs.
 
 ## Usage
 

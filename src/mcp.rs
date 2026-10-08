@@ -235,7 +235,10 @@ impl HarnessTool {
                                 .unwrap_or_else(|_| value.to_string());
                             Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
                         }
-                        Err(message) => Err(ErrorData::internal_error(message, None)),
+                        // `isError: true` content, not a protocol-level error: an expected
+                        // failure ("no local player connected") is a normal tool outcome the
+                        // agent reads and reacts to, not a server fault.
+                        Err(message) => Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into()),
                     }
                 })
             },
@@ -247,7 +250,13 @@ impl HarnessTool {
 /// which is `bevy_remote`'s render-subapp BRP port (`DEFAULT_RENDER_PORT`, active whenever
 /// `bevy_render` runs): binding our MCP listener there made the render app's BRP bind fail and
 /// the main BRP pipeline hang in release builds.
-pub fn start_mcp_server(brp_port: u16, mcp_port: u16, extra_tools: Vec<HarnessTool>) {
+pub fn start_mcp_server(
+    brp_port: u16,
+    mcp_port: u16,
+    method_prefix: String,
+    disabled_tools: Vec<String>,
+    extra_tools: Vec<HarnessTool>,
+) {
     std::thread::Builder::new()
         .name("mcp-server".into())
         .spawn(move || {
@@ -256,7 +265,9 @@ pub fn start_mcp_server(brp_port: u16, mcp_port: u16, extra_tools: Vec<HarnessTo
                 .enable_all()
                 .build()
                 .expect("mcp server: tokio runtime should build");
-            if let Err(err) = runtime.block_on(serve_mcp(brp_port, mcp_port, extra_tools)) {
+            if let Err(err) =
+                runtime.block_on(serve_mcp(brp_port, method_prefix, disabled_tools, extra_tools, mcp_port))
+            {
                 error!("mcp server stopped: {err:?}");
             }
         })
@@ -265,15 +276,17 @@ pub fn start_mcp_server(brp_port: u16, mcp_port: u16, extra_tools: Vec<HarnessTo
 
 async fn serve_mcp(
     brp_port: u16,
-    mcp_port: u16,
+    method_prefix: String,
+    disabled_tools: Vec<String>,
     extra_tools: Vec<HarnessTool>,
+    mcp_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::StreamableHttpService;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
     let session_manager: std::sync::Arc<LocalSessionManager> = Default::default();
     let service = StreamableHttpService::new(
-        move || Ok(GameTools::new(brp_port, extra_tools.clone())),
+        move || Ok(GameTools::new(brp_port, &method_prefix, disabled_tools.clone(), extra_tools.clone())),
         session_manager,
         Default::default(),
     );
@@ -352,6 +365,39 @@ pub struct MouseInputParams {
 struct GameTools {
     client: BrpClient,
     router: ToolRouter<GameTools>,
+    /// The BRP method name prefix (from [`crate::McpHarnessConfig::method_prefix`]) — the
+    /// built-in tools proxy to `{prefix}/…`.
+    method_prefix: String,
+}
+
+impl GameTools {
+    fn new(
+        brp_port: u16,
+        method_prefix: &str,
+        disabled_tools: Vec<String>,
+        extra_tools: Vec<HarnessTool>,
+    ) -> Self {
+        let client = BrpClient::new(brp_port);
+        let mut router = Self::tool_router();
+        for tool in extra_tools {
+            router.add_route(tool.into_route(client.clone()));
+        }
+        // Hidden tools disappear from tools/list AND fail on call — for hosts where a
+        // built-in is meaningless (a headless dedicated server hides screenshots/UI/input).
+        for name in disabled_tools {
+            router.disable_route(name);
+        }
+        Self {
+            client,
+            router,
+            method_prefix: method_prefix.to_owned(),
+        }
+    }
+
+    /// The BRP method name for a built-in tool, honoring the configured prefix.
+    fn method(&self, name: &str) -> String {
+        format!("{}/{}", self.method_prefix, name)
+    }
 }
 
 /// The `screenshot` tool's parameters — both optional; omit them for a full-frame capture.
@@ -364,17 +410,6 @@ pub struct ScreenshotParams {
     /// dumps (e.g. a button's rect). A crop costs fewer vision tokens and keeps full effective
     /// resolution on the region of interest. Clamped to frame bounds.
     pub crop: Option<Vec<f64>>,
-}
-
-impl GameTools {
-    fn new(brp_port: u16, extra_tools: Vec<HarnessTool>) -> Self {
-        let client = BrpClient::new(brp_port);
-        let mut router = Self::tool_router();
-        for tool in extra_tools {
-            router.add_route(tool.into_route(client.clone()));
-        }
-        Self { client, router }
-    }
 }
 
 /// The tool definitions live in this block; the handlers proxy to BRP.
@@ -403,7 +438,7 @@ impl GameTools {
     /// The host's `game/state` snapshot (empty unless the app registered a snapshot hook).
     #[rmcp::tool(description = "Snapshot of the current game state as registered by the host app (app state, player entity/position/health, whatever the game exposes). Empty object if the host registered no snapshot hook. Call this before/after other tools to see what changed.")]
     async fn game_state(&self) -> Result<CallToolResult, ErrorData> {
-        let result = self.brp("game/state", json!({})).await?;
+        let result = self.brp(&self.method("game/state"), json!({})).await?;
         Self::text_result(result).await
     }
 
@@ -428,10 +463,10 @@ impl GameTools {
             }
             params["crop"] = json!(crop);
         }
-        self.brp("game/screenshot", params).await?;
+        self.brp(&self.method("game/screenshot"), params).await?;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let result = self.brp("game/screenshot/get", json!({})).await?;
+            let result = self.brp(&self.method("game/screenshot/get"), json!({})).await?;
             if result.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
                 continue;
             }
@@ -466,7 +501,7 @@ impl GameTools {
     /// Reports this harness's launch configuration: mode flags and surface ports.
     #[rmcp::tool(description = "Report this harness's launch configuration: no_render flag, brp_port, mcp_port, screenshots_dir, whether screenshots are available, and the offscreen target size (headless). Call this FIRST on any session — it tells you which tools are meaningful here (e.g. no_render clients have no screenshots and never load world visuals) and which port each surface is on when testing several clients at once.")]
     async fn client_info(&self) -> Result<CallToolResult, ErrorData> {
-        let result = self.brp("game/client_info", json!({})).await?;
+        let result = self.brp(&self.method("game/client_info"), json!({})).await?;
         Self::text_result(result).await
     }
 
@@ -488,7 +523,7 @@ impl GameTools {
     /// pixels.
     #[rmcp::tool(description = "Dump the UI tree as an accessibility-tree-style list: every visible UI node's rect [x,y,w,h] in the SAME screenshot pixel space game/mouse move_to consumes, its text (button labels), and interaction/hover state. Read THIS to find what to click and where, then use mouse_input move_to + button Left to click it. Much more reliable than estimating coordinates from the screenshot image. Also useful to verify text rendered (the dump shows the string regardless of font issues).")]
     async fn ui_tree(&self) -> Result<CallToolResult, ErrorData> {
-        let result = self.brp("game/ui", json!({})).await?;
+        let result = self.brp(&self.method("game/ui"), json!({})).await?;
         Self::text_result(result).await
     }
 
@@ -523,7 +558,7 @@ impl GameTools {
                 ))
             }
         };
-        let result = self.brp("game/gamepad", params).await?;
+        let result = self.brp(&self.method("game/gamepad"), params).await?;
         Self::text_result(result).await
     }
 
@@ -542,7 +577,7 @@ impl GameTools {
             })?;
             json!({"key": key, "pressed": pressed.unwrap_or(true)})
         };
-        let result = self.brp("game/keyboard", params).await?;
+        let result = self.brp(&self.method("game/keyboard"), params).await?;
         Self::text_result(result).await
     }
 
@@ -592,7 +627,7 @@ impl GameTools {
                 ))
             }
         };
-        let result = self.brp("game/mouse", params).await?;
+        let result = self.brp(&self.method("game/mouse"), params).await?;
         Self::text_result(result).await
     }
 }

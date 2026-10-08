@@ -113,20 +113,29 @@ passes against the *old* process. Kill it before concluding anything.
 ## Configuration (`McpHarnessConfig`)
 
 - Ports: BRP `bevy::remote::http::DEFAULT_PORT` (15702), MCP `DEFAULT_MCP_PORT` (15710).
-  **MCP must never bind 15703** — that is `bevy_remote`'s render-subapp BRP port; binding there
-  breaks the render app's BRP pipeline.
+  **MCP must never bind 15703** — that is `bevy_remote`'s render-subapp BRP port (binding the
+  MCP listener there breaks the render app's BRP bind).
 - `--brp-port` / `--mcp-port` / `--no-render` are read by `McpHarnessConfig::from_env`
-  (fleet testing: several clients on one machine, each at its own port).
-- Fleet isolation: a non-default `brp_port` captures into `screenshots/client-<port>/` — a
-  shared directory cross-contaminates `game/screenshot/get` polls between clients.
-- `offscreen_size: Some(...)` = headless mode (offscreen texture, bootstrap UI camera, camera
-  ordering systems, agent cursor overlay). `no_render: true` = no wgpu at all (screenshots
-  return a clean error; UI layout, `game/ui`, hover, clicks still work).
-- `state_snapshot: Option<StateSnapshotFn>` = the host's `game/state` payload (empty object
-  without one); fused into every screenshot poll response and the `<capture>.json` sidecar.
-- Screenshots land in `McpHarnessConfig::screenshots_dir` (default `<cwd>/mcp_harness/
-  screenshots/`, gitignored). Files persist — they are the human-browsable record; nothing
-  consumes them on read.
+  (client-flavored defaults) / `from_env_with_defaults(brp, mcp)` (servers with their own
+  conventions). Fleet isolation: a non-default `brp_port` captures into `screenshots/
+  client-<port>/` — hosts with their own screenshots convention call the public
+  `isolated_screenshots_dir(base, brp_port)` to get the same rule.
+- `offscreen: OffscreenMode`: `Owned(size)` = the harness owns the full headless stack
+  (target + bootstrap UI camera + retarget chain + cursor overlay); `HostManaged(handle)` =
+  the host keeps its own target/resource and machinery (for hosts whose headless code also
+  runs without this crate compiled in) and the harness reads the handle + adds only the cursor
+  overlay; `Windowed` = primary-window captures.
+- `no_render: true`: `NoRenderMode` marker (screenshot methods return a clean error). The
+  `target_info` shim is added only in `Owned` — a `HostManaged` host feeds its own.
+- `state_snapshot` / `client_info_host`: the host's `game/state` payload, and extra mode flags
+  merged under `"host"` in `game/client_info` (the harness payload is otherwise closed).
+- `clickable: Option<ClickableFn>`: the host's clickable-UI convention for `game/ui` beyond
+  `bevy_ui::Interaction` (e.g. an HTML-markup UI's click hooks). `Interaction` holders are
+  always clickable.
+- `method_prefix` (default `"game"`) renames the BRP methods (`server/state` on a dedicated
+  server); `disabled_tools` hides meaningless built-ins from `tools/list` and rejects calls.
+- `extra_tools` + `register_game_method(app, "game/x", system)` for game-specific MCP tools
+  and BRP methods.
 
 ## Headless support: what the plugin adds, and why
 

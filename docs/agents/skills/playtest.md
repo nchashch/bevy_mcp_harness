@@ -1,5 +1,9 @@
 # Skill: Playtesting a Bevy app with the bevy_mcp_harness
 
+> Note: file paths in these guides (`docs/agents/…`, `crates/client/…`) refer to the
+> **bevy_mcp_harness repository**, not the app being tested — the guides are served from the
+> harness binary itself.
+
 Read this before driving an app as an agent. It is the distilled, battle-tested
 playbook for launching a Bevy app headlessly, driving it through the QA tool API,
 observing state, capturing what you see, and avoiding every trap hit so far.
