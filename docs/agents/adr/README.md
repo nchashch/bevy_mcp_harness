@@ -30,5 +30,6 @@ everything learned from the first real host adoption (prototype_19 itself).
 | [0004](./0004-agent-guides-bundled-into-the-binary.md) | Agent guides bundled into the binary and served via `read_guide` | Accepted |
 | [0005](./0005-extension-ergonomics-from-the-first-host-adoption.md) | Extension ergonomics from the first real host adoption (prototype_19) | Accepted |
 | [0006](./0006-pre-flight-preconditions-and-no-pddl-planner.md) | Pre-flight preconditions (`plan_check`) — and no PDDL planner | Accepted |
+| [0007](./0007-token-efficiency-tool-set.md) | Token-efficiency tool set: suppression, server-side waiting, compound actions, downscale, sequences, assertions | Accepted |
 
 New records should be added to this index in the same commit that adds the file.
