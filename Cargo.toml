@@ -1,6 +1,6 @@
 [package]
 name = "bevy_mcp_harness"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps"
 license = "MIT OR Apache-2.0"
@@ -15,6 +15,12 @@ categories = ["game-development", "development-tools::testing"]
 # unifies features with the harness's — default features made `wayland-sys`'s build script
 # demand libwayland on a GPU-less CI runner). The feature list below is what the crate's code
 # actually touches; hosts enable the rest (winit, render pipelines, …) themselves.
+# The p19-style render-debug views (depth/normals/motion vectors — the F1 overlay of
+# bevy_dev_tools) as a screenshot `debug_view` parameter. Off by default: it pulls
+# `bevy_dev_tools` (and its render-pipeline deps) into host builds that enable it.
+[features]
+render_debug = ["dep:bevy_dev_tools", "bevy/bevy_dev_tools", "bevy/bevy_core_pipeline"]
+
 [dependencies]
 # `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`
 # variants by name through KeyCode's own serde impl.
@@ -48,6 +54,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = "1"
 serde = "1"
 schemars = "1.0"
+# Render-debug views (`render_debug` feature): `bevy_dev_tools`' overlay reads prepass/gbuffer
+# textures, so it needs the render-pipeline crates — none of which pull winit/wayland.
+bevy_dev_tools = { version = "0.19.1", optional = true }
 
 # Examples build against the full bevy feature set (the `--render` branch uses `DefaultPlugins`)
 # — dev-dependency features only affect examples/tests, never host builds of the lib.

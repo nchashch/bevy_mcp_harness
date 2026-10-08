@@ -494,6 +494,23 @@ impl Plugin for BevyMcpHarnessPlugin {
             app.add_plugins(bevy::camera::visibility::VisibilityPlugin);
         }
 
+        // Render-debug views (`render_debug` feature): the bevy_dev_tools overlay that F1
+        // cycles in normal play — depth / normals / motion vectors / deferred buffers. Adds
+        // the pipeline (render app) and the F1/F2 keybinds (main world, `Update`); safe with
+        // no render app (the plugin early-returns its render-side setup). `debug_view` on
+        // `game/screenshot` sets this overlay on the capture camera for one capture.
+        // Guarded: `RenderDebugOverlayPlugin` is part of `DefaultPlugins` when the
+        // `bevy_dev_tools` feature is on, so full-feature hosts already have it. The runner
+        // is added UNCONDITIONALLY — it drives the deferred capture regardless of who added
+        // the overlay plugin.
+        #[cfg(feature = "render_debug")]
+        {
+            if !app.is_plugin_added::<bevy_dev_tools::render_debug::RenderDebugOverlayPlugin>() {
+                app.add_plugins(bevy_dev_tools::render_debug::RenderDebugOverlayPlugin);
+            }
+            app.add_systems(Update, brp::render_debug::runner);
+        }
+
         app.insert_resource(config.clone());
         app.init_resource::<brp::LastServedCapture>();
         app.init_resource::<brp::LastUiDump>();

@@ -537,6 +537,11 @@ pub struct ScreenshotParams {
     /// edge (aspect preserved, clamped 64..=4096). Use ~640 for overview checks; omit for
     /// full-resolution detail reads.
     pub max_dimension: Option<u32>,
+    /// Optional render-debug view (requires the host to enable the harness's `render_debug`
+    /// feature): `depth`, `normals`, `motion_vectors`, `deferred`, `deferred_base_color`,
+    /// `deferred_emissive`, `deferred_metallic_roughness`, `depth_pyramid` — the same views
+    /// F1 cycles in normal play, rendered into this one capture.
+    pub debug_view: Option<String>,
 }
 
 /// The tool definitions live in this block; the handlers proxy to BRP.
@@ -575,7 +580,7 @@ impl GameTools {
     #[rmcp::tool(description = "Capture a screenshot of the game. Returns the PNG as image content PLUS the game's ground-truth state as JSON text (same payload as game_state), so you never need to read numbers off the HUD. Optional `crop` [x,y,w,h] captures just a region (read the rect off game/ui first) — cheaper and sharper than a full frame. Optional `max_dimension` (64..=4096) downscales the encoded PNG to fit that many pixels on the long edge — use ~640 for overview checks (did it render, is the menu up) to cut vision tokens ~4×; omit for full-resolution detail reads. A visible crosshair marks your mocked mouse cursor when running headless (red = idle, yellow = hovering, white = left held). If the response says unchanged:true, the pixels are IDENTICAL to the last image you were served — do not ask for it again; read the included state instead.")]
     async fn screenshot(
         &self,
-        Parameters(ScreenshotParams { label, crop, max_dimension }): Parameters<ScreenshotParams>,
+        Parameters(ScreenshotParams { label, crop, max_dimension, debug_view }): Parameters<ScreenshotParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let mut params = json!({});
         if let Some(label) = label {
@@ -592,6 +597,9 @@ impl GameTools {
         }
         if let Some(max_dimension) = max_dimension {
             params["max_dimension"] = json!(max_dimension.clamp(64, 4096));
+        }
+        if let Some(debug_view) = debug_view.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            params["debug_view"] = json!(debug_view);
         }
         self.brp(&self.method("screenshot"), params).await?;
         for _ in 0..40 {

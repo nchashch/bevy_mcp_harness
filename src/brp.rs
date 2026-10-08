@@ -350,6 +350,30 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         })?),
         None => None,
     };
+    // Optional render-debug view (depth / normals / motion vectors / deferred buffers — the
+    // bevy_dev_tools F1 overlay) for this capture only. Applied to the capture camera (the
+    // `camera` param, else the highest-order camera on the capture target / primary window)
+    // and restored after the capture. Requires the `render_debug` cargo feature.
+    #[cfg(feature = "render_debug")]
+    let debug_mode = params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("debug_view"))
+        .and_then(serde_json::Value::as_str)
+        .map(render_debug::parse_mode)
+        .transpose()?;
+    #[cfg(not(feature = "render_debug"))]
+    if params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("debug_view"))
+        .is_some()
+    {
+        return Err(BrpError::internal(
+            "debug_view requires the render_debug cargo feature (bevy_dev_tools render-debug \
+             views)",
+        ));
+    }
     // Optional overview downscale: the encoded PNG fits within this many pixels on its long
     // edge (aspect preserved). The capture itself stays full-resolution; the crop (if any) is
     // applied first, then the resize — a cropped region keeps full effective resolution.
@@ -424,6 +448,65 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .get_resource::<CaptureTarget>()
         .map(|target| Screenshot(bevy::camera::RenderTarget::Image(target.0.clone().into())))
         .unwrap_or_else(Screenshot::primary_window);
+
+    // A `debug_view` capture is deferred: the overlay and its prepass pipelines compile on
+    // first use, so the runner applies the overlay and spawns the capture only after a few
+    // warm-up frames (see the render_debug module docs). Without `debug_view`, spawn now.
+    #[cfg(feature = "render_debug")]
+    if let Some(mode) = debug_mode {
+        let camera = render_debug::resolve_camera(world, capture_camera)?;
+        let missing = render_debug::required_prepasses(&mode)
+            .iter()
+            .copied()
+            .filter(|name| {
+                !match *name {
+                    "DepthPrepass" => world
+                        .get::<bevy::core_pipeline::prepass::DepthPrepass>(camera)
+                        .is_some(),
+                    "NormalPrepass" => world
+                        .get::<bevy::core_pipeline::prepass::NormalPrepass>(camera)
+                        .is_some(),
+                    "MotionVectorPrepass" => world
+                        .get::<bevy::core_pipeline::prepass::MotionVectorPrepass>(camera)
+                        .is_some(),
+                    "DeferredPrepass" => world
+                        .get::<bevy::core_pipeline::prepass::DeferredPrepass>(camera)
+                        .is_some(),
+                    _ => false,
+                }
+            })
+            .collect();
+        world.insert_resource(render_debug::PendingDebugView {
+            camera,
+            mode,
+            previous_overlay: world
+                .get::<bevy_dev_tools::render_debug::RenderDebugOverlay>(camera)
+                .cloned(),
+            missing_prepasses: missing,
+            capture: Some(render_debug::EncodedCapture {
+                path: path.clone(),
+                crop,
+                max_dimension,
+            }),
+            frames_since_apply: 0,
+            overlay_applied: false,
+        });
+        return Ok(json!({
+            "status": "capturing",
+            "poll": "game/screenshot/get",
+            "path": path.display().to_string(),
+            "crop": crop,
+            "max_dimension": max_dimension,
+            "debug_view": params
+                .0
+                .as_ref()
+                .and_then(|p| p.get("debug_view"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "note": "debug view applied deferred — the first game/screenshot/get poll may return ready:false for a few hundred ms while the debug pipelines warm up",
+        }));
+    }
+
     world
         .spawn(capture_target)
         .observe(save_encoded_to_disk(path.clone(), crop, max_dimension))
@@ -617,6 +700,269 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "path": path.display().to_string(),
             "state": state,
         }))
+    }
+}
+
+/// Render-debug screenshot support — the `debug_view` parameter on `game/screenshot`: the
+/// bevy_dev_tools F1 overlay (depth / normals / motion vectors / deferred buffers) applied
+/// to the capture camera for one capture, then restored. Requires the `render_debug` cargo
+/// feature — `bevy_dev_tools` pulls the render-pipeline crates, so it is not part of the
+/// minimal-bevy default graph.
+///
+/// Why deferred: the overlay and its prepass pipelines compile on first use — a capture
+/// spawned in the same frame as the overlay insert races the compile and comes back as a
+/// normal render (observed). So the request lands in [`PendingDebugView`], and a runner
+/// system waits [`WARMUP_FRAMES`] before inserting the overlay and spawning the capture; by
+/// then the pipelines are warm and the capture shows the debug view. The restore observer
+/// runs on capture-complete (pipelines stay warm by then, so restoring immediately is safe).
+#[cfg(feature = "render_debug")]
+pub(crate) mod render_debug {
+    use super::*;
+    use bevy_dev_tools::render_debug::{RenderDebugMode, RenderDebugOverlay};
+
+    /// Frames between applying the overlay and spawning the capture — enough for the overlay
+    /// and prepass pipelines to compile and produce their first pass.
+    pub(crate) const WARMUP_FRAMES: u32 = 5;
+
+    /// Valid `debug_view` names → modes. `depth_pyramid` additionally needs
+    /// `OcclusionCulling` on the camera to produce meaningful data.
+    pub(crate) fn parse_mode(name: &str) -> Result<RenderDebugMode, BrpError> {
+        Ok(match name {
+            "depth" => RenderDebugMode::Depth,
+            "normals" => RenderDebugMode::Normal,
+            "motion_vectors" => RenderDebugMode::MotionVectors,
+            "deferred" => RenderDebugMode::Deferred,
+            "deferred_base_color" => RenderDebugMode::DeferredBaseColor,
+            "deferred_emissive" => RenderDebugMode::DeferredEmissive,
+            "deferred_metallic_roughness" => RenderDebugMode::DeferredMetallicRoughness,
+            "depth_pyramid" => RenderDebugMode::DepthPyramid { mip_level: 0 },
+            other => {
+                return Err(BrpError::internal(&format!(
+                    "unknown debug_view {other:?} (expected depth | normals | motion_vectors | \
+                     deferred | deferred_base_color | deferred_emissive | \
+                     deferred_metallic_roughness | depth_pyramid)"
+                )));
+            }
+        })
+    }
+
+    /// The prepass markers the overlay's data source needs for `mode` (matching
+    /// bevy_dev_tools' own F1 support rules: `Depth` reads the depth prepass or the deferred
+    /// gbuffer, `Normal` the normal prepass or the gbuffer, `MotionVectors` the motion-vector
+    /// prepass, the deferred modes the deferred prepass).
+    pub(crate) fn required_prepasses(mode: &RenderDebugMode) -> &'static [&'static str] {
+        match mode {
+            RenderDebugMode::Depth => &["DepthPrepass"],
+            RenderDebugMode::Normal => &["NormalPrepass"],
+            RenderDebugMode::MotionVectors => &["MotionVectorPrepass"],
+            RenderDebugMode::Deferred
+            | RenderDebugMode::DeferredBaseColor
+            | RenderDebugMode::DeferredEmissive
+            | RenderDebugMode::DeferredMetallicRoughness => &["DeferredPrepass"],
+            RenderDebugMode::DepthPyramid { .. } => &["DepthPrepass"],
+        }
+    }
+
+    /// The capture camera for a debug view: the explicitly requested camera, else the
+    /// highest-order active camera on the capture target (headless: the most recent "agent's
+    /// view" camera), else the highest-order active camera on the primary window.
+    pub(crate) fn resolve_camera(
+        world: &mut World,
+        explicit: Option<Entity>,
+    ) -> Result<Entity, BrpError> {
+        if let Some(camera) = explicit {
+            return Ok(camera);
+        }
+        if let Some(target) = world.get_resource::<CaptureTarget>() {
+            let target = target.0.clone();
+            let mut best: Option<(Entity, isize)> = None;
+            let mut query =
+                world.query_filtered::<(Entity, &bevy::camera::RenderTarget, &Camera), ()>();
+            for (entity, render_target, camera) in query.iter(world) {
+                if render_target
+                    .as_image()
+                    .is_some_and(|image| image.id() == target.id())
+                    && best.is_none_or(|(_, order)| camera.order > order)
+                {
+                    best = Some((entity, camera.order));
+                }
+            }
+            return best.map(|(entity, _)| entity).ok_or_else(|| {
+                BrpError::internal(
+                    "no active camera renders to the capture target (use game/cameras to list \
+                     cameras and pass `camera`)"
+                        .to_owned(),
+                )
+            });
+        }
+        let mut best: Option<(Entity, isize)> = None;
+        let mut query =
+            world.query_filtered::<(Entity, &bevy::camera::RenderTarget, &Camera), ()>();
+        for (entity, render_target, camera) in query.iter(world) {
+            if matches!(
+                render_target,
+                bevy::camera::RenderTarget::Window(bevy::window::WindowRef::Primary)
+            ) && best.is_none_or(|(_, order)| camera.order > order)
+            {
+                best = Some((entity, camera.order));
+            }
+        }
+        best.map(|(entity, _)| entity).ok_or_else(|| {
+            BrpError::internal(
+                "no active camera renders to the primary window (use game/cameras to list \
+                 cameras and pass `camera`)"
+                    .to_owned(),
+            )
+        })
+    }
+
+    /// A deferred debug-view capture: the overlay is applied and the screenshot entity
+    /// spawned [`WARMUP_FRAMES`] frames after the request (see the module docs).
+    #[derive(Resource)]
+    pub(crate) struct PendingDebugView {
+        pub camera: Entity,
+        pub mode: RenderDebugMode,
+        pub previous_overlay: Option<RenderDebugOverlay>,
+        pub missing_prepasses: Vec<&'static str>,
+        pub capture: Option<EncodedCapture>,
+        pub frames_since_apply: u32,
+        /// Set to `true` once the runner has applied the overlay + prepasses; the counter
+        /// then counts frames until the capture spawns (giving the render app time to
+        /// extract and run the overlay pass).
+        pub overlay_applied: bool,
+    }
+
+    /// The saved capture request, taken out of [`PendingDebugView`] when the warm-up is done.
+    #[derive(Clone)]
+    pub(crate) struct EncodedCapture {
+        pub path: PathBuf,
+        pub crop: Option<[u32; 4]>,
+        pub max_dimension: Option<u32>,
+    }
+
+    /// The camera state to restore after a debug-view capture: prepass markers the harness
+    /// inserted, and the camera's previous overlay (if any).
+    #[derive(Resource)]
+    pub(crate) struct RenderDebugRestore {
+        pub entity: Entity,
+        pub previous_overlay: Option<RenderDebugOverlay>,
+        pub depth: bool,
+        pub normal: bool,
+        pub motion: bool,
+        pub deferred: bool,
+    }
+
+    /// Runs every `Update`: applies the pending overlay on the first call, then spawns the
+    /// capture a few frames later (once the overlay has been extracted and rendered); with
+    /// no pending capture, nothing happens.
+    pub(crate) fn runner(world: &mut World) {
+        let Some(mut pending) = world.get_resource_mut::<PendingDebugView>() else {
+            return;
+        };
+        if !pending.overlay_applied {
+            // Phase 1: apply the overlay + prepasses. The render app extracts them on the
+            // NEXT frame's render pass — so the capture can't spawn yet.
+            pending.overlay_applied = true;
+            pending.frames_since_apply = 0;
+            let camera = pending.camera;
+            let mode = pending.mode;
+            let missing = pending.missing_prepasses.clone();
+            drop(pending);
+            {
+                let mut entity = world.entity_mut(camera);
+                entity.insert(RenderDebugOverlay {
+                    enabled: true,
+                    mode,
+                    opacity: 1.0,
+                });
+                use bevy::core_pipeline::prepass::{
+                    DepthPrepass, DeferredPrepass, MotionVectorPrepass, NormalPrepass,
+                };
+                for name in missing.iter().copied() {
+                    match name {
+                        "DepthPrepass" => {
+                            entity.insert(DepthPrepass);
+                        }
+                        "NormalPrepass" => {
+                            entity.insert(NormalPrepass);
+                        }
+                        "MotionVectorPrepass" => {
+                            entity.insert(MotionVectorPrepass);
+                        }
+                        "DeferredPrepass" => {
+                            entity.insert(DeferredPrepass);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return;
+        }
+        // Phase 2: the overlay has been active for a few frames — the render app has
+        // extracted it and the overlay/prepass pipelines are warm. Spawn the capture.
+        pending.frames_since_apply += 1;
+        if pending.frames_since_apply < WARMUP_FRAMES {
+            return;
+        }
+        let Some(capture) = pending.capture.take() else {
+            return;
+        };
+        let camera = pending.camera;
+        let previous_overlay = pending.previous_overlay.clone();
+        let missing = pending.missing_prepasses.clone();
+        drop(pending);
+        world.insert_resource(RenderDebugRestore {
+            entity: camera,
+            previous_overlay,
+            depth: missing.contains(&"DepthPrepass"),
+            normal: missing.contains(&"NormalPrepass"),
+            motion: missing.contains(&"MotionVectorPrepass"),
+            deferred: missing.contains(&"DeferredPrepass"),
+        });
+        world
+            .spawn(Screenshot(bevy::camera::RenderTarget::Image(
+                world
+                    .get_resource::<CaptureTarget>()
+                    .expect("debug_view only runs when a CaptureTarget exists")
+                    .0
+                    .clone()
+                    .into(),
+            )))
+            .observe(save_encoded_to_disk(capture.path, capture.crop, capture.max_dimension))
+            .observe(restore_render_debug);
+        world.remove_resource::<PendingDebugView>();
+    }
+
+    /// Restores the capture camera after a debug-view capture. Runs on `ScreenshotCaptured`
+    /// — the image is already transferred to the event, so removing the overlay here cannot
+    /// affect the saved file. The overlay/prepass pipelines are warm by capture time (the
+    /// capture was deferred past their warm-up), so restoring immediately is safe.
+    pub(crate) fn restore_render_debug(
+        _captured: On<ScreenshotCaptured>,
+        restore: Option<Res<RenderDebugRestore>>,
+        mut commands: Commands,
+    ) {
+        let Some(restore) = restore else {
+            return;
+        };
+        let mut entity = commands.entity(restore.entity);
+        if restore.depth {
+            entity.remove::<bevy::core_pipeline::prepass::DepthPrepass>();
+        }
+        if restore.normal {
+            entity.remove::<bevy::core_pipeline::prepass::NormalPrepass>();
+        }
+        if restore.motion {
+            entity.remove::<bevy::core_pipeline::prepass::MotionVectorPrepass>();
+        }
+        if restore.deferred {
+            entity.remove::<bevy::core_pipeline::prepass::DeferredPrepass>();
+        }
+        match &restore.previous_overlay {
+            Some(previous) => entity.insert(previous.clone()),
+            None => entity.remove::<RenderDebugOverlay>(),
+        };
+        commands.remove_resource::<RenderDebugRestore>();
     }
 }
 
