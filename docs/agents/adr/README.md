@@ -31,5 +31,7 @@ everything learned from the first real host adoption (prototype_19 itself).
 | [0005](./0005-extension-ergonomics-from-the-first-host-adoption.md) | Extension ergonomics from the first real host adoption (prototype_19) | Accepted |
 | [0006](./0006-pre-flight-preconditions-and-no-pddl-planner.md) | Pre-flight preconditions (`plan_check`) — and no PDDL planner | Accepted |
 | [0007](./0007-token-efficiency-tool-set.md) | Token-efficiency tool set: suppression, server-side waiting, compound actions, downscale, sequences, assertions | Accepted |
+| [0008](./0008-entity-to-pixel-correlation.md) | Entity-to-pixel correlation (`entities_on_screen`) | Accepted |
+| [0009](./0009-render-debug-views-on-screenshots.md) | Render-debug views on screenshots (`debug_view` parameter) | Accepted |
 
 New records should be added to this index in the same commit that adds the file.
