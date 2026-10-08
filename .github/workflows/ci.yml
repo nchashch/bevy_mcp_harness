@@ -28,15 +28,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Guard — the lib must not pull winit/Wayland
+        # `cargo tree -i <pkg>` exits 0 with a "nothing to print" warning when the package is
+        # absent (observed on stable-1.98), so the guard greps the tree output instead of
+        # relying on the exit code.
         run: |
-          if cargo tree -e normal -i wayland-sys; then
-            echo "::error::wayland-sys is in the lib's dependency graph — a feature crept back into the default set"
+          cargo tree -e normal > dependency-tree.txt
+          if grep -E '(wayland-sys|winit)' dependency-tree.txt; then
+            echo "::error::winit/Wayland is in the lib's dependency graph — a feature crept back into the default set"
             exit 1
           fi
-          if cargo tree -e normal -i winit; then
-            echo "::error::winit is in the lib's dependency graph — a feature crept back into the default set"
-            exit 1
-          fi
+          echo "lib graph clean: no winit/Wayland"
 
       - name: Test (unit + doctests)
         run: cargo test --lib --doc
