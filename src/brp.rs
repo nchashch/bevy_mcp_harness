@@ -420,6 +420,12 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         ));
     };
     let path = next_screenshot_path(&dir, label);
+    // Persist the encode geometry for the poll handler (see [`LastCaptureParams`]).
+    world.insert_resource(LastCaptureParams {
+        path: path.clone(),
+        crop,
+        max_dimension,
+    });
     // Camera-targeted capture: raise the requested camera's draw order above everything else
     // for this frame, screenshot the shared offscreen texture (which every camera here renders
     // into), and restore order/clear afterwards. Reusing the offscreen texture (instead of a
@@ -591,6 +597,20 @@ struct CameraCaptureRestore {
     entity: Entity,
     original_order: isize,
     original_clear: ClearColorConfig,
+}
+
+/// The encode-time geometry of the most recent `game/screenshot` request, written by
+/// [`screenshot_start_method`] and consumed by [`screenshot_get_method`]. The poll handler
+/// can't otherwise know a capture's `crop`/`max_dimension` (they were request params, echoed
+/// only in the `capturing` response) — and without them the poll can't report how the PNG on
+/// disk relates to the full-resolution capture space every coordinate table (`entities`,
+/// `game/ui` rects) is measured in. Matched against the polled file's path, so a stale entry
+/// from a newer capture is ignored rather than misapplied.
+#[derive(Resource)]
+struct LastCaptureParams {
+    path: PathBuf,
+    crop: Option<[u32; 4]>,
+    max_dimension: Option<u32>,
 }
 
 /// Runs on the capture entity when it completes: puts the borrowed camera's original draw
@@ -893,6 +913,12 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
     let state = game_state_snapshot(world);
     let entities = screenshot_get_entities(world);
 
+    // Coordinate alignment (see [`screenshot_get_alignment`]): the coordinate tables
+    // (`entities`, `game/ui` rects) are in full-resolution capture space; the PNG on disk may
+    // be cropped and/or downscaled (`max_dimension`). Without this block a post-hoc annotator
+    // silently draws at the wrong scale.
+    let alignment = screenshot_get_alignment(world, &path, &bytes);
+
     // Unchanged-frame suppression: PNG bytes are a deterministic function of the frame
     // (same encoder, same pixels → same bytes), so hashing the file hashes the frame.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -908,6 +934,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "path": path.display().to_string(),
             "state": state,
             "entities": entities,
+            "alignment": alignment,
         }));
     }
     if let Some(mut last) = world.get_resource_mut::<LastServedCapture>() {
@@ -919,14 +946,16 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let sidecar = path.with_extension("json");
         if !sidecar.exists() {
-            // `entities` is included so the sidecar is a self-contained annotation source:
-            // the per-frame entity table lives only in the poll response otherwise, and a
-            // post-hoc annotator (a later session, a human, the report flow) can't re-derive
-            // it — `entities_on_screen` projects the *current* frame, not the captured one.
+            // `entities` and `alignment` are included so the sidecar is a self-contained
+            // annotation source: the per-frame entity table and the encode geometry live only
+            // in the poll response otherwise, and a post-hoc annotator (a later session, a
+            // human, the report flow) can't re-derive either — `entities_on_screen` projects
+            // the *current* frame, not the captured one.
             let record = json!({
                 "screenshot": path.display().to_string(),
                 "state": state,
                 "entities": entities,
+                "alignment": alignment,
             });
             if let Ok(text) = serde_json::to_string_pretty(&record) {
                 let _ = std::fs::write(&sidecar, text);
@@ -938,8 +967,67 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "path": path.display().to_string(),
             "state": state,
             "entities": entities,
+            "alignment": alignment,
         }))
     }
+}
+
+/// The coordinate-alignment block for a capture (`screenshot/get` responses and sidecars):
+/// how the PNG on disk maps onto the full-resolution capture space the coordinate tables
+/// (`entities`, `game/ui` rects, `game/mouse move_to`) are measured in.
+///
+/// - `png_size` — the encoded PNG's own dimensions (parsed from its IHDR header, exact).
+/// - `capture_size` — the render target's full resolution (headless: the offscreen texture;
+///   `null` in windowed sessions, where the harness never reads window state).
+/// - `crop` / `max_dimension` — the capture request's params (from [`LastCaptureParams`];
+///   `null`/omitted when the polled file isn't the most recent request's path).
+/// - `coordinate_scale` — multiply coordinate-table values by this to land on the PNG:
+///   `crop.w / png.w` when cropped (the crop is applied before any resize), else
+///   `capture.w / png.w`, else 1.0 (a full-resolution uncropped capture). `null`
+///   only when the scale is genuinely unknowable: a windowed, uncropped, downscaled capture
+///   (the harness doesn't know the window's pixel size).
+fn screenshot_get_alignment(
+    world: &mut World,
+    path: &Path,
+    bytes: &[u8],
+) -> serde_json::Value {
+    // PNG IHDR: 8-byte signature + 4-byte length + "IHDR" + 13 data bytes; width/height are
+    // u32 big-endian at offsets 16 and 20. Every capture is PNG (`save_encoded_to_disk`).
+    let png_size = (bytes.len() >= 24 && bytes.starts_with(b"\x89PNG\r\n\x1a\n")).then(|| {
+        let be = |chunk: &[u8]| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        [be(&bytes[16..20]), be(&bytes[20..24])]
+    });
+    let capture_size = world
+        .get_resource::<CaptureTarget>()
+        .and_then(|target| {
+            world
+                .get_resource::<Assets<Image>>()
+                .and_then(|images| images.get(&target.0))
+                .map(|image| [image.size().x, image.size().y])
+        });
+    let request = world
+        .get_resource::<LastCaptureParams>()
+        .filter(|params| params.path == path);
+    let crop = request.and_then(|params| params.crop);
+    let max_dimension = request.and_then(|params| params.max_dimension);
+    let scale = png_size
+        .filter(|size| size[0] > 0)
+        .map(|png| {
+            let full_width = crop
+                .map(|crop| crop[2])
+                .filter(|&w| w > 0)
+                .or(capture_size.map(|size| size[0]))
+                .filter(|&w| w > 0);
+            full_width.map(|full| full as f64 / png[0] as f64)
+        })
+        .unwrap_or(None);
+    json!({
+        "png_size": png_size,
+        "capture_size": capture_size,
+        "crop": crop,
+        "max_dimension": max_dimension,
+        "coordinate_scale": scale,
+    })
 }
 
 /// Render-debug screenshot support — the `debug_view` parameter on `game/screenshot`: the
