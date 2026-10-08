@@ -16,6 +16,7 @@ terms as Bevy itself.
 
 | bevy_mcp_harness | bevy |
 |---|---|
+| 0.2.x | 0.19.1+ |
 | 0.1.x | 0.19.1+ |
 
 One harness line per bevy minor release. 0.1.x requires bevy **0.19.1 or later 0.19.x** — the
