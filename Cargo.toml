@@ -1,6 +1,6 @@
 [package]
 name = "bevy_mcp_harness"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps"
 license = "MIT OR Apache-2.0"
@@ -10,10 +10,25 @@ documentation = "https://docs.rs/bevy_mcp_harness"
 keywords = ["bevy", "mcp", "testing", "playtesting", "gamedev"]
 categories = ["game-development", "development-tools::testing"]
 
+# `default-features = false`: the harness must not drag winit/wayland/X11 system deps into
+# hosts whose bevy is minimal (a headless dedicated server with the harness as a dependency
+# unifies features with the harness's — default features made `wayland-sys`'s build script
+# demand libwayland on a GPU-less CI runner). The feature list below is what the crate's code
+# actually touches; hosts enable the rest (winit, render pipelines, …) themselves.
 [dependencies]
 # `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`
 # variants by name through KeyCode's own serde impl.
-bevy = { version = "0.19.1", features = ["bevy_remote", "serialize"] }
+bevy = { version = "0.19.1", default-features = false, features = [
+    "bevy_camera",
+    "bevy_log",
+    "bevy_mesh",
+    "bevy_picking",
+    "bevy_remote",
+    "bevy_render",
+    "bevy_text",
+    "bevy_ui",
+    "serialize",
+] }
 rmcp = { version = "3.5.1", features = [
     "server",
     "macros",
@@ -33,3 +48,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = "1"
 serde = "1"
 schemars = "1.0"
+
+# Examples build against the full bevy feature set (the `--render` branch uses `DefaultPlugins`)
+# — dev-dependency features only affect examples/tests, never host builds of the lib.
+[dev-dependencies]
+bevy = { version = "0.19.1" }
