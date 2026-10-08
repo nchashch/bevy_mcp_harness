@@ -6,7 +6,8 @@ of the code only — history and rationale live in the git log and in the load-b
 decisions — the extraction from prototype_19, the generalization boundary, headless-rendering
 ownership, the bundled guides, the extension ergonomics, the pre-flight precondition design,
 and the token-efficiency tool set). When a change alters behavior described here, update this
-file in the same change; do not append changelog entries.
+file in the same change; do not append changelog entries. Release-facing changes go in
+[`CHANGELOG.md`](CHANGELOG.md) in the same change.
 
 ## Rules
 
