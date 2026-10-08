@@ -10,7 +10,7 @@ use bevy::ui::IsDefaultUiCamera;
 
 /// The offscreen texture every camera renders to in headless mode — the rendered view the
 /// agent's `game/screenshot` tool reads. Created once at plugin build (see
-/// [`crate::McpHarnessConfig::offscreen_size`]).
+/// `McpHarnessConfig::offscreen`).
 #[derive(Resource, Clone)]
 pub struct OffscreenRenderTarget(pub Handle<Image>);
 

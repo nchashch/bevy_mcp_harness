@@ -28,7 +28,7 @@ use crate::{McpHarnessConfig, NoRenderMode};
 /// `game/state` — the host-registered snapshot (see [`crate::StateSnapshotFn`]). An empty
 /// object when the host registered no hook. Params are ignored.
 pub(crate) fn game_state_method(_params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
-    Ok(game_state_snapshot(world).into())
+    Ok(game_state_snapshot(world))
 }
 
 /// The `game/state` payload as a plain JSON value. Shared by the `game/state` method and
@@ -82,7 +82,7 @@ pub(crate) fn client_info_method(_params: In<Option<serde_json::Value>>, world: 
     if let Some(host) = config.client_info_host.clone() {
         payload["host"] = host(world);
     }
-    Ok(payload.into())
+    Ok(payload)
 }
 
 /// `game/cameras` — lists every camera: entity id (usable as `game/screenshot`'s `camera`
@@ -114,8 +114,7 @@ pub(crate) fn cameras_method(_params: In<Option<serde_json::Value>>, world: &mut
     Ok(json!({
         "note": "Camera entities. entity = u64 id usable as game/screenshot's `camera` param. yaw/pitch in radians (forward = +X at yaw 0). Reposition via world.mutate_components (Transform).",
         "cameras": rows,
-    })
-    .into())
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +210,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
                 })?;
             let entity = bevy::ecs::entity::Entity::from_bits(bits);
             if world.get_entity(entity).is_err() {
-                return Err(BrpError::internal(&format!(
+                return Err(BrpError::internal(format!(
                     "camera entity {bits} does not exist (use game/cameras to list cameras)"
                 )));
             }
@@ -234,7 +233,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         let (original_order, original_clear) = match world.get::<Camera>(camera_entity) {
             Some(camera) => (camera.order, camera.clear_color),
             None => {
-                return Err(BrpError::internal(&format!(
+                return Err(BrpError::internal(format!(
                     "camera entity {camera_entity:?} does not exist (use game/cameras to list cameras)"
                 )));
             }
@@ -264,8 +263,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         "poll": "game/screenshot/get",
         "path": path.display().to_string(),
         "crop": crop,
-    })
-    .into())
+    }))
 }
 
 /// The camera whose draw order was raised for a camera-targeted capture, and what to put back.
@@ -359,7 +357,6 @@ fn save_cropped_to_disk(
 #[derive(Resource, Default)]
 pub struct LastServedCapture {
     hash: Option<u64>,
-    path: Option<PathBuf>,
 }
 
 /// `game/screenshot/get` — polls the newest capture: `{"ready": true, "png_base64": …, "path":
@@ -378,11 +375,11 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
         ));
     };
     let Some(path) = newest_screenshot(&dir) else {
-        return Ok(json!({"ready": false}).into());
+        return Ok(json!({"ready": false}));
     };
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(_) => return Ok(json!({"ready": false}).into()),
+        Err(_) => return Ok(json!({"ready": false})),
     };
     let state = game_state_snapshot(world);
 
@@ -400,12 +397,10 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "unchanged": true,
             "path": path.display().to_string(),
             "state": state,
-        })
-        .into());
+        }));
     }
     if let Some(mut last) = world.get_resource_mut::<LastServedCapture>() {
         last.hash = Some(hash);
-        last.path = Some(path.clone());
     }
 
     {
@@ -426,8 +421,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
             "png_base64": encoded,
             "path": path.display().to_string(),
             "state": state,
-        })
-        .into())
+        }))
     }
 }
 
@@ -460,7 +454,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
 /// headless mode only nodes targeting the offscreen capture are dumped; windowed dumps
 /// everything.
 pub(crate) fn ui_dump_method(_params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
-    Ok(ui_dump_snapshot(world).into())
+    Ok(ui_dump_snapshot(world))
 }
 
 /// The cursor overlay's root node — zero-size, absolutely positioned, follows the mocked
@@ -548,6 +542,7 @@ pub(crate) fn spawn_agent_cursor_if_headless(
 /// × `UiScale`) — hence the round-trip through the node's own `inverse_scale_factor`, the
 /// same factor `ui_layout_system` derived, so the overlay lands exactly on the pointer
 /// whatever the scale.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn update_agent_cursor(
     offscreen: Option<Res<CaptureTarget>>,
     images: Option<Res<Assets<Image>>>,
@@ -943,7 +938,7 @@ pub(crate) fn gamepad_method(params: In<Option<serde_json::Value>>, world: &mut 
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| BrpError::internal("missing params.button"))?;
             let button = parse_gamepad_button(button_name)
-                .ok_or_else(|| BrpError::internal(&format!("unknown button {button_name:?}")))?;
+                .ok_or_else(|| BrpError::internal(format!("unknown button {button_name:?}")))?;
             let pressed = params
                 .get("pressed")
                 .and_then(serde_json::Value::as_bool)
@@ -956,7 +951,7 @@ pub(crate) fn gamepad_method(params: In<Option<serde_json::Value>>, world: &mut 
             // `Binding::GamepadButton` arm directly. `1.0`/`0.0` here is what a real button
             // reports through this same path — Bevy's own button-axis convention.
             gamepad.analog_mut().set(button, if pressed { 1.0 } else { 0.0 });
-            Ok(json!({"gamepad_entity": gamepad_entity, "button": button_name, "pressed": pressed}).into())
+            Ok(json!({"gamepad_entity": gamepad_entity, "button": button_name, "pressed": pressed}))
         }
         "axis" => {
             let axis_name = params
@@ -964,19 +959,19 @@ pub(crate) fn gamepad_method(params: In<Option<serde_json::Value>>, world: &mut 
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| BrpError::internal("missing params.axis"))?;
             let axis = parse_gamepad_axis(axis_name)
-                .ok_or_else(|| BrpError::internal(&format!("unknown axis {axis_name:?}")))?;
+                .ok_or_else(|| BrpError::internal(format!("unknown axis {axis_name:?}")))?;
             let value = params
                 .get("value")
                 .and_then(serde_json::Value::as_f64)
                 .ok_or_else(|| BrpError::internal("missing params.value"))? as f32;
             gamepad.analog_mut().set(axis, value);
-            Ok(json!({"gamepad_entity": gamepad_entity, "axis": axis_name, "value": value}).into())
+            Ok(json!({"gamepad_entity": gamepad_entity, "axis": axis_name, "value": value}))
         }
         "reset" => {
             *gamepad = Gamepad::default();
-            Ok(json!({"gamepad_entity": gamepad_entity, "reset": true}).into())
+            Ok(json!({"gamepad_entity": gamepad_entity, "reset": true}))
         }
-        other => Err(BrpError::internal(&format!(
+        other => Err(BrpError::internal(format!(
             "unknown input {other:?} (expected button|axis|reset)"
         ))),
     }
@@ -1039,14 +1034,14 @@ pub(crate) fn keyboard_method(params: In<Option<serde_json::Value>>, world: &mut
     let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
     if params.get("reset").and_then(serde_json::Value::as_bool) == Some(true) {
         keys.release_all();
-        return Ok(json!({"reset": true}).into());
+        return Ok(json!({"reset": true}));
     }
     let key_name = params
         .get("key")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| BrpError::internal("missing params.key"))?;
     let key: KeyCode = serde_json::from_value(json!(key_name))
-        .map_err(|err| BrpError::internal(&format!("unknown key {key_name:?}: {err}")))?;
+        .map_err(|err| BrpError::internal(format!("unknown key {key_name:?}: {err}")))?;
     let pressed = params
         .get("pressed")
         .and_then(serde_json::Value::as_bool)
@@ -1056,7 +1051,7 @@ pub(crate) fn keyboard_method(params: In<Option<serde_json::Value>>, world: &mut
     } else {
         keys.release(key);
     }
-    Ok(json!({"key": key_name, "pressed": pressed}).into())
+    Ok(json!({"key": key_name, "pressed": pressed}))
 }
 
 /// The pointer this whole method drives. **Not a synthetic entity we spawn** — unlike
@@ -1186,7 +1181,7 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| BrpError::internal("missing params.button"))?;
             let button = parse_mouse_button(button_name)
-                .ok_or_else(|| BrpError::internal(&format!("unknown button {button_name:?}")))?;
+                .ok_or_else(|| BrpError::internal(format!("unknown button {button_name:?}")))?;
             let pressed = params
                 .get("pressed")
                 .and_then(serde_json::Value::as_bool)
@@ -1210,7 +1205,7 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                 };
                 world.write_message(PointerInput::new(AGENT_POINTER, location, action));
             }
-            Ok(json!({"button": button_name, "pressed": pressed}).into())
+            Ok(json!({"button": button_name, "pressed": pressed}))
         }
         "motion" => {
             let dx = params.get("dx").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
@@ -1235,7 +1230,7 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                     PointerAction::Move { delta },
                 ));
             }
-            Ok(json!({"dx": dx, "dy": dy}).into())
+            Ok(json!({"dx": dx, "dy": dy}))
         }
         "move_to" => {
             let Some(target) = target else {
@@ -1258,7 +1253,7 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                     delta: position - previous.position,
                 },
             ));
-            Ok(json!({"x": x, "y": y}).into())
+            Ok(json!({"x": x, "y": y}))
         }
         "wheel" => {
             let x = params.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
@@ -1271,7 +1266,7 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                 "Line" => MouseScrollUnit::Line,
                 "Pixel" => MouseScrollUnit::Pixel,
                 other => {
-                    return Err(BrpError::internal(&format!(
+                    return Err(BrpError::internal(format!(
                         "unknown scroll unit {other:?} (expected Line|Pixel)"
                     )));
                 }
@@ -1301,7 +1296,7 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                     },
                 ));
             }
-            Ok(json!({"x": x, "y": y, "unit": unit_name}).into())
+            Ok(json!({"x": x, "y": y, "unit": unit_name}))
         }
         "reset" => {
             world.resource_mut::<ButtonInput<MouseButton>>().release_all();
@@ -1324,9 +1319,9 @@ pub(crate) fn mouse_method(params: In<Option<serde_json::Value>>, world: &mut Wo
                 unit: MouseScrollUnit::Line,
                 delta: Vec2::ZERO,
             });
-            Ok(json!({"reset": true}).into())
+            Ok(json!({"reset": true}))
         }
-        other => Err(BrpError::internal(&format!(
+        other => Err(BrpError::internal(format!(
             "unknown input {other:?} (expected button|motion|move_to|wheel|reset)"
         ))),
     }

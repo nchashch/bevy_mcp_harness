@@ -148,8 +148,7 @@ fn demo_button_method(_params: In<Option<serde_json::Value>>, world: &mut World)
             node.size().y.round() as i32,
         ],
         "interaction": interaction.copied().map(|interaction| format!("{interaction:?}")),
-    })
-    .into())
+    }))
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -210,7 +209,7 @@ fn observe_mocked_input(
     button: Query<&Interaction, With<DemoButton>>,
     hover: Option<Res<bevy::picking::hover::HoverMap>>,
 ) {
-    if frame.0 % 120 != 0 {
+    if !frame.0.is_multiple_of(120) {
         return;
     }
     let interaction = button.iter().next().copied();

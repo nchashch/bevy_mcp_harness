@@ -297,7 +297,7 @@ async fn serve_mcp(
     Ok(())
 }
 
-/// The `gamepad_input` tool's parameters — see [`crate::brp::gamepad_method`]'s doc comment for
+/// The `gamepad_input` tool's parameters — see `game/gamepad`'s doc comment for
 /// the full button/axis name lists and why this is a genuinely different mechanism from an
 /// action-level mock.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -319,7 +319,7 @@ pub struct GamepadInputParams {
     pub value: Option<f64>,
 }
 
-/// The `keyboard_input` tool's parameters — see [`crate::brp::keyboard_method`]'s doc comment.
+/// The `keyboard_input` tool's parameters — see `game/keyboard`'s doc comment.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct KeyboardInputParams {
     /// `true` to release every currently-pressed key, ignoring `key`/`pressed`.
@@ -332,7 +332,7 @@ pub struct KeyboardInputParams {
     pub pressed: Option<bool>,
 }
 
-/// The `mouse_input` tool's parameters — see [`crate::brp::mouse_method`]'s doc comment for the
+/// The `mouse_input` tool's parameters — see `game/mouse`'s doc comment for the
 /// full design (why cursor motion/clicks go through `bevy_picking`'s real event pipeline).
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct MouseInputParams {

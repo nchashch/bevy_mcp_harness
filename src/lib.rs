@@ -14,10 +14,10 @@
 //!    state on a synthetic gamepad entity, so injected state flows through input crates' *real*
 //!    binding resolution — dead zones, shared-device ownership, per-context device selection —
 //!    exactly like a human's controller), `game/keyboard` (mocks `ButtonInput<KeyCode>`
-//!    directly — see [`brp::keyboard_method`]), and `game/mouse` (mocks
+//!    directly — see `game/keyboard`), and `game/mouse` (mocks
 //!    `ButtonInput<MouseButton>` plus real `MouseMotion`/`MouseWheel` events, and drives
 //!    `bevy_picking`'s own `PointerInput` pipeline for cursor position and UI clicks — see
-//!    [`brp::mouse_method`]'s doc comment, including a real gotcha found by testing:
+//!    `game/mouse`'s doc comment, including a real gotcha found by testing:
 //!    `AccumulatedMouseMotion`/`AccumulatedMouseScroll` can't be set directly, only injected as
 //!    events). `game/ui` is the vision aid that pairs with all of this: an accessibility-tree
 //!    dump of labeled rects + text in screenshot pixel space, so the model reads rows instead
@@ -43,16 +43,13 @@
 //!
 //!    ```no_run
 //!    # use bevy::prelude::*;
-//!    # use bevy_mcp_harness::BevyMcpHarnessPlugin;
+//!    # use bevy_mcp_harness::register_game_method;
 //!    # #[derive(Component)] struct Health { current: f32 }
-//!    # fn my_game_state(world: &mut World) -> bevy::remote::BrpResult {
+//!    # fn my_game_state(_: In<Option<serde_json::Value>>, world: &mut World) -> bevy::remote::BrpResult {
 //!    #     Ok(serde_json::json!({}).into())
 //!    # }
 //!    fn register_my_methods(app: &mut App) {
-//!        let id = app.register_system(my_game_state);
-//!        app.world_mut()
-//!            .resource_mut::<bevy::remote::RemoteMethods>()
-//!            .insert("game/my_state", bevy::remote::RemoteMethodSystemId::Instant(id));
+//!        register_game_method(app, "game/my_state", my_game_state);
 //!    }
 //!    ```
 //!
@@ -63,7 +60,7 @@
 //!    ```no_run
 //!    # use bevy::prelude::*;
 //!    # use bevy_mcp_harness::{BevyMcpHarnessPlugin, BrpClient, HarnessTool, McpHarnessConfig};
-//!    # #[derive(serde::de::DeserializeOwned, schemars::JsonSchema)]
+//!    # #[derive(serde::Deserialize, schemars::JsonSchema)]
 //!    # struct MyToolArgs { detailed: bool }
 //!    # fn make_tool() -> HarnessTool {
 //!    HarnessTool::new(
@@ -83,8 +80,8 @@
 //!    #     extra_tools: vec![tool], ..McpHarnessConfig::default() } };
 //!    ```
 //!
-//!    (The host crate needs `rmcp`, `serde`, `schemars`, and `serde_json` in its
-//!    `[dependencies]` only for the argument struct derives — the harness re-exports
+//!    (The host crate needs `serde`, `schemars`, and `serde_json` in its
+//!    `[dependencies]` for the argument struct derives — the harness re-exports
 //!    [`BrpClient`] and [`HarnessTool`] itself.)
 //!
 //! # Usage
@@ -331,17 +328,11 @@ where
 /// The MCP + Agent playtesting harness. Adds the BRP server (unless the host already did),
 /// registers the `game/*` custom methods, runs the in-process MCP server on a background
 /// thread, and — configured for headless use — owns the offscreen render target machinery.
+#[derive(Default)]
 pub struct BevyMcpHarnessPlugin {
     pub config: McpHarnessConfig,
 }
 
-impl Default for BevyMcpHarnessPlugin {
-    fn default() -> Self {
-        Self {
-            config: McpHarnessConfig::default(),
-        }
-    }
-}
 
 impl Plugin for BevyMcpHarnessPlugin {
     fn build(&self, app: &mut App) {

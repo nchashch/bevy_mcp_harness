@@ -1,17 +1,35 @@
 # bevy_mcp_harness
 
-A localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps. Ported from
-PROTOTYPE_19's `dev/tool_api` (ADR 0009) into a reusable plugin.
+A localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps.
 
 **Dev/QA tooling only — never enable in player-facing builds.** BRP is unauthenticated by
 design; both surfaces bind to `127.0.0.1` only.
+
+For an example of this being used in a demo see [this repo](https://github.com/nchashch/p19).
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), your choice — the same
+terms as Bevy itself.
+
+## Bevy compatibility
+
+| bevy_mcp_harness | bevy |
+|---|---|
+| 0.1.x | 0.19.1+ |
+
+One harness line per bevy minor release. 0.1.x requires bevy **0.19.1 or later 0.19.x** — the
+crate reads bevy internals whose shape changed within 0.19 (e.g. `RenderTarget::as_image()`
+returning `&Handle<Image>`), so it will not compile against 0.19.0. Harness patch releases
+never require a bevy bump.
 
 ## Architecture
 
 Three layers:
 
 1. **BRP** (`bevy_remote`): JSON-RPC 2.0 over HTTP on `127.0.0.1:15702`. The built-in methods
-   (`bevy/query`, `bevy/get_components`, `bevy/spawn`, …) expose the whole reflected ECS.
+   (`world/query`, `world/get_components`, `world/spawn_entity`, …) expose the whole reflected
+   ECS.
 2. **Custom BRP methods** — the game tools:
    - `game/state` — the host-registered snapshot (see `McpHarnessConfig::state_snapshot`);
      empty object when the host registers no hook.
