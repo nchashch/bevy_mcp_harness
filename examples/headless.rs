@@ -24,7 +24,9 @@ use bevy::picking::input::PointerInputPlugin;
 use bevy::prelude::*;
 use bevy::time::TimePlugin;
 use bevy::window::ExitCondition;
-use bevy_mcp_harness::{BevyMcpHarnessPlugin, DEFAULT_OFFSCREEN_SIZE, McpHarnessConfig};
+use bevy_mcp_harness::{
+    BevyMcpHarnessPlugin, BrpClient, DEFAULT_OFFSCREEN_SIZE, HarnessTool, McpHarnessConfig,
+};
 
 fn main() {
     // `--render`: include the render plugins (offscreen Vulkan rendering — needs a GPU or
@@ -81,11 +83,17 @@ fn main() {
         config: McpHarnessConfig {
             offscreen_size: Some(DEFAULT_OFFSCREEN_SIZE),
             no_render: !render,
+            // Game-specific MCP tool served alongside the harness's built-ins (see
+            // `register_game_methods` below for the BRP method it proxies to).
+            extra_tools: vec![describe_button_tool()],
             ..McpHarnessConfig::from_env()
         },
     })
     .add_systems(Startup, spawn_ui)
     .add_systems(Update, (observe_mocked_input, exit_after_warmup));
+    // Custom BRP methods attach any time after the harness plugin: the system is registered
+    // here, in `main`, and served from the `RemoteMethods` resource from then on.
+    register_game_methods(&mut app);
     if !render {
         // `UiPlugin`'s Image-widget sizing systems read `Assets<TextureAtlasLayout>`, which a
         // render-side plugin normally registers; a render-less host must init it by hand.
@@ -96,6 +104,76 @@ fn main() {
 
 #[derive(Component)]
 struct DemoButton;
+
+// --- Game-specific extension demo -------------------------------------------------------------
+// The host app owns its game logic; the harness just serves it. Two halves:
+//
+// 1. A custom BRP method (`game/demo_button`): a normal system with `&mut World` access,
+//    registered into `RemoteMethods` AFTER the harness plugin — any plugin or Startup system
+//    can do this, whenever the game's own types are available.
+// 2. An MCP tool (`demo_button`) via `McpHarnessConfig::extra_tools`, whose callback proxies
+//    to that BRP method through the provided `BrpClient`.
+
+fn register_game_methods(app: &mut App) {
+    let demo_button = app.register_system(demo_button_method);
+    app.world_mut()
+        .resource_mut::<bevy::remote::RemoteMethods>()
+        .insert(
+            "game/demo_button",
+            bevy::remote::RemoteMethodSystemId::Instant(demo_button),
+        );
+}
+/// `game/demo_button` — reads this game's own components straight out of the `World` (impossible
+/// from the MCP thread; this is why the tool layer proxies over BRP).
+fn demo_button_method(_params: In<Option<serde_json::Value>>, world: &mut World) -> bevy::remote::BrpResult {
+    use bevy::remote::BrpError;
+    let Ok((entity, node, transform, interaction)) = world
+        .query_filtered::<(
+            Entity,
+            &ComputedNode,
+            &UiGlobalTransform,
+            Option<&Interaction>,
+        ), With<DemoButton>>()
+        .single(world)
+    else {
+        return Err(BrpError::internal("demo button not found (not laid out yet?)"));
+    };
+    let (_, _, translation) = transform.to_scale_angle_translation();
+    Ok(serde_json::json!({
+        "entity": entity,
+        "rect": [
+            (translation.x - node.size().x / 2.0).round() as i32,
+            (translation.y - node.size().y / 2.0).round() as i32,
+            node.size().x.round() as i32,
+            node.size().y.round() as i32,
+        ],
+        "interaction": interaction.copied().map(|interaction| format!("{interaction:?}")),
+    })
+    .into())
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct DescribeButtonArgs {
+    /// Also include the `game/ui` dump for this frame.
+    include_ui_dump: bool,
+}
+
+/// The MCP-facing half: typed args (schema generated via schemars) + a `BrpClient` callback.
+fn describe_button_tool() -> HarnessTool {
+    HarnessTool::new(
+        "demo_button",
+        "This game's demo button: entity id, rect in screenshot pixel space, and interaction state.",
+        |client: BrpClient, args: DescribeButtonArgs| async move {
+            let mut result = client.call("game/demo_button", serde_json::json!({})).await?;
+            if args.include_ui_dump {
+                result["ui"] = client.call("game/ui", serde_json::json!({})).await?;
+            }
+            Ok(result)
+        },
+    )
+}
+
+// ----------------------------------------------------------------------------------------------
 
 fn spawn_ui(mut commands: Commands) {
     // The harness's bootstrap UI camera exists already (headless mode); all we add is one

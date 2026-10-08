@@ -30,6 +30,61 @@
 //! **Never enable this in player-facing builds**: it is a debug/QA tool surface and BRP is
 //! unauthenticated by design — localhost bind only.
 //!
+//! # Extending with game-specific tools
+//!
+//! Two independent extension points, both available to the host app at any time (before or
+//! after the plugin is added, in any plugin's `build`):
+//!
+//! 1. **Custom BRP methods** — attach a system to the `bevy::remote::RemoteMethods` resource.
+//!    Handlers run in the main world with `&mut World` access, so they can read game state
+//!    directly:
+//!
+//!    ```no_run
+//!    # use bevy::prelude::*;
+//!    # use bevy_mcp_harness::BevyMcpHarnessPlugin;
+//!    # #[derive(Component)] struct Health { current: f32 }
+//!    # fn my_game_state(world: &mut World) -> bevy::remote::BrpResult {
+//!    #     Ok(serde_json::json!({}).into())
+//!    # }
+//!    fn register_my_methods(app: &mut App) {
+//!        let id = app.register_system(my_game_state);
+//!        app.world_mut()
+//!            .resource_mut::<bevy::remote::RemoteMethods>()
+//!            .insert("game/my_state", bevy::remote::RemoteMethodSystemId::Instant(id));
+//!    }
+//!    ```
+//!
+//! 2. **Custom MCP tools** — pass [`HarnessTool`]s via [`McpHarnessConfig::extra_tools`]. The
+//!    callback runs on the MCP server thread with parsed arguments and a [`BrpClient`]; the
+//!    conventional shape proxies to a custom BRP method like the one above:
+//!
+//!    ```no_run
+//!    # use bevy::prelude::*;
+//!    # use bevy_mcp_harness::{BevyMcpHarnessPlugin, BrpClient, HarnessTool, McpHarnessConfig};
+//!    # #[derive(serde::de::DeserializeOwned, schemars::JsonSchema)]
+//!    # struct MyToolArgs { detailed: bool }
+//!    # fn make_tool() -> HarnessTool {
+//!    HarnessTool::new(
+//!        "my_state",
+//!        "Game-specific state snapshot.",
+//!        |client: BrpClient, args: MyToolArgs| async move {
+//!            let mut params = serde_json::json!({});
+//!            if args.detailed {
+//!                params["detailed"] = serde_json::json!(true);
+//!            }
+//!            client.call("game/my_state", params).await
+//!        },
+//!    )
+//!    # }
+//!    # let tool = make_tool();
+//!    # let _ = BevyMcpHarnessPlugin { config: McpHarnessConfig {
+//!    #     extra_tools: vec![tool], ..McpHarnessConfig::default() } };
+//!    ```
+//!
+//!    (The host crate needs `rmcp`, `serde`, `schemars`, and `serde_json` in its
+//!    `[dependencies]` only for the argument struct derives — the harness re-exports
+//!    [`BrpClient`] and [`HarnessTool`] itself.)
+//!
 //! # Usage
 //!
 //! ```no_run
@@ -49,6 +104,7 @@ pub mod headless;
 pub mod mcp;
 
 pub use headless::{HeadlessUiCameraBootstrap, NoRenderMode, OffscreenRenderTarget};
+pub use mcp::{BrpClient, HarnessTool};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -103,6 +159,10 @@ pub struct McpHarnessConfig {
     /// The host's `game/state` snapshot hook — see [`StateSnapshotFn`]. `game/state` returns
     /// an empty object without one.
     pub state_snapshot: Option<StateSnapshotFn>,
+    /// Game-specific MCP tools served alongside the built-ins — see [`HarnessTool`]. The
+    /// usual shape: a custom BRP method registered by the host (any plugin, any time) plus an
+    /// `extra_tools` entry whose callback proxies to it through the provided [`BrpClient`].
+    pub extra_tools: Vec<HarnessTool>,
 }
 
 impl Default for McpHarnessConfig {
@@ -115,6 +175,7 @@ impl Default for McpHarnessConfig {
             offscreen_size: None,
             no_render: false,
             state_snapshot: None,
+            extra_tools: Vec::new(),
         }
     }
 }
@@ -308,6 +369,10 @@ impl Plugin for BevyMcpHarnessPlugin {
             bevy::remote::RemoteMethodSystemId::Instant(cameras_method),
         );
 
-        mcp::start_mcp_server(config.brp_port, config.mcp_port);
+        mcp::start_mcp_server(
+            config.brp_port,
+            config.mcp_port,
+            config.extra_tools.clone(),
+        );
     }
 }

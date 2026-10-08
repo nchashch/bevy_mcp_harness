@@ -80,6 +80,46 @@ curl -s http://127.0.0.1:15702 -X POST -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"game/ui","params":{}}'
 ```
 
+## Extending with game-specific tools
+
+Both extension points are available to the host app at any time, before or after the plugin is
+added (the crate is a normal cargo dependency — no forking needed):
+
+1. **Custom BRP methods** — attach a system to `bevy::remote::RemoteMethods`; handlers run in
+   the main world with `&mut World` access:
+
+   ```rust
+   let id = app.register_system(my_game_state_method);
+   app.world_mut()
+       .resource_mut::<bevy::remote::RemoteMethods>()
+       .insert("game/my_state", bevy::remote::RemoteMethodSystemId::Instant(id));
+   ```
+
+2. **Custom MCP tools** — pass `HarnessTool`s via `McpHarnessConfig::extra_tools`. Arguments
+   deserialize into your own struct (schema generated via schemars); the callback gets a
+   `BrpClient` (loopback JSON-RPC to this app's BRP surface — including your custom methods
+   from step 1) and returns JSON:
+
+   ```rust
+   BevyMcpHarnessPlugin {
+       config: McpHarnessConfig {
+           extra_tools: vec![HarnessTool::new(
+               "my_state",
+               "Game-specific state snapshot.",
+               |client: BrpClient, args: MyToolArgs| async move {
+                   client.call("game/my_state", serde_json::json!({ "detailed": args.detailed }))
+                       .await
+               },
+           )],
+           ..Default::default()
+       },
+   }
+   ```
+
+   The host needs `rmcp`, `serde`, `schemars`, and `serde_json` as direct dependencies only
+   for the argument-struct derives. `examples/headless.rs` demonstrates both halves end to end
+   (`game/demo_button` + the `demo_button` MCP tool).
+
 ## Ports
 
 - BRP: 15702 (`bevy::remote::http::DEFAULT_PORT`); `--brp-port N` for fleet testing.

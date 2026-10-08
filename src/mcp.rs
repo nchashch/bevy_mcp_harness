@@ -4,15 +4,139 @@
 //! run outside Bevy's world; all `World` access stays in BRP's systems).
 
 use bevy::log::{error, info};
-use rmcp::model::{CallToolResult, ContentBlock, ErrorData, ServerConfig};
+use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResult, ContentBlock, ErrorData, ServerConfig, Tool};
 use serde_json::json;
+use std::sync::Arc;
+
+/// A loopback HTTP client to this app's BRP surface — the handle handed to every
+/// [`HarnessTool`] callback. Custom tools drive the app the same way the built-in ones do:
+/// JSON-RPC methods over `127.0.0.1:<brp_port>` (built-ins like `bevy/query` work, and so do
+/// custom methods the host registered — see the crate docs' "Extending" section).
+#[derive(Clone)]
+pub struct BrpClient {
+    url: String,
+}
+
+impl BrpClient {
+    fn new(brp_port: u16) -> Self {
+        Self {
+            url: format!("http://127.0.0.1:{brp_port}"),
+        }
+    }
+
+    /// One BRP JSON-RPC round-trip; unwraps the envelope into the `result` payload.
+    pub async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let response = reqwest::Client::new()
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|err| format!("brp unreachable: {err}"))?;
+        let envelope: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| format!("brp bad response: {err}"))?;
+        if let Some(error) = envelope.get("error") {
+            return Err(format!("brp error from {method}: {error}"));
+        }
+        Ok(envelope
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
+type ToolFuture =
+    std::pin::Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>;
+type ToolCallback = Arc<dyn Fn(BrpClient, serde_json::Value) -> ToolFuture + Send + Sync>;
+
+/// A host-supplied MCP tool, registered via [`crate::McpHarnessConfig::extra_tools`] and served
+/// by the harness's MCP server alongside the built-ins. The callback receives parsed arguments
+/// (schema generated from `P` via schemars) and a [`BrpClient`]; return the tool's result as
+/// JSON (served as pretty-printed text content) or an `Err` message (surfaced as a tool error).
+///
+/// The host never touches rmcp types: everything (schema, dispatch, error mapping) is handled
+/// here.
+#[derive(Clone)]
+pub struct HarnessTool {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    call: ToolCallback,
+}
+
+impl HarnessTool {
+    /// Defines a tool whose arguments deserialize into `P` (its JSON schema is generated
+    /// automatically). `call` runs on the MCP server thread — never touch the Bevy `World`
+    /// from it; drive the app through the [`BrpClient`] instead.
+    pub fn new<P, F, Fut>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        call: F,
+    ) -> Self
+    where
+        P: serde::de::DeserializeOwned + schemars::JsonSchema,
+        F: Fn(BrpClient, P) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    {
+        let input_schema = serde_json::to_value(schemars::schema_for!(P))
+            .unwrap_or_else(|_| json!({"type": "object"}));
+        let call: ToolCallback = Arc::new(move |client, args| {
+            match serde_json::from_value::<P>(args) {
+                Ok(parsed) => Box::pin(call(client, parsed)),
+                Err(err) => Box::pin(async move { Err(format!("invalid arguments: {err}")) }),
+            }
+        });
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            call,
+        }
+    }
+
+    /// Wraps the tool as an rmcp route on the harness's server struct. The callback gets a
+    /// clone of the loopback client and the raw JSON arguments (already schema-validated by
+    /// `HarnessTool::new`'s deserialization).
+    fn into_route(self, client: BrpClient) -> ToolRoute<GameTools> {
+        let input_schema = match self.input_schema {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        let call = self.call;
+        ToolRoute::new_dyn(
+            Tool::new(self.name, self.description, Arc::new(input_schema)),
+            move |context| {
+                let client = client.clone();
+                let call = call.clone();
+                let args = serde_json::Value::Object(context.arguments.unwrap_or_default());
+                Box::pin(async move {
+                    match call(client, args).await {
+                        Ok(value) => {
+                            let text = serde_json::to_string_pretty(&value)
+                                .unwrap_or_else(|_| value.to_string());
+                            Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
+                        }
+                        Err(message) => Err(ErrorData::internal_error(message, None)),
+                    }
+                })
+            },
+        )
+    }
+}
 
 /// Binds the MCP surface. The MCP port defaults to [`crate::DEFAULT_MCP_PORT`] — NOT 15703,
 /// which is `bevy_remote`'s render-subapp BRP port (`DEFAULT_RENDER_PORT`, active whenever
 /// `bevy_render` runs): binding our MCP listener there made the render app's BRP bind fail and
 /// the main BRP pipeline hang in release builds.
-pub fn start_mcp_server(brp_port: u16, mcp_port: u16) {
+pub fn start_mcp_server(brp_port: u16, mcp_port: u16, extra_tools: Vec<HarnessTool>) {
     std::thread::Builder::new()
         .name("mcp-server".into())
         .spawn(move || {
@@ -21,20 +145,24 @@ pub fn start_mcp_server(brp_port: u16, mcp_port: u16) {
                 .enable_all()
                 .build()
                 .expect("mcp server: tokio runtime should build");
-            if let Err(err) = runtime.block_on(serve_mcp(brp_port, mcp_port)) {
+            if let Err(err) = runtime.block_on(serve_mcp(brp_port, mcp_port, extra_tools)) {
                 error!("mcp server stopped: {err:?}");
             }
         })
         .expect("mcp server: thread should spawn");
 }
 
-async fn serve_mcp(brp_port: u16, mcp_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn serve_mcp(
+    brp_port: u16,
+    mcp_port: u16,
+    extra_tools: Vec<HarnessTool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rmcp::transport::streamable_http_server::StreamableHttpService;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
     let session_manager: std::sync::Arc<LocalSessionManager> = Default::default();
     let service = StreamableHttpService::new(
-        move || Ok(GameTools::new(brp_port)),
+        move || Ok(GameTools::new(brp_port, extra_tools.clone())),
         session_manager,
         Default::default(),
     );
@@ -106,10 +234,13 @@ pub struct MouseInputParams {
 }
 
 /// The MCP tool surface — every tool is a thin proxy to a BRP method over loopback HTTP; all
-/// `World` access lives in the BRP handlers in [`crate::brp`].
+/// `World` access lives in the BRP handlers in [`crate::brp`]. The router is per-instance so
+/// host-supplied [`HarnessTool`]s can be added at construction (routes are dynamic closures —
+/// no compile-time coupling on the host side).
 #[derive(Clone)]
 struct GameTools {
-    brp_url: String,
+    client: BrpClient,
+    router: ToolRouter<GameTools>,
 }
 
 /// The `screenshot` tool's parameters — both optional; omit them for a full-frame capture.
@@ -125,12 +256,13 @@ pub struct ScreenshotParams {
 }
 
 impl GameTools {
-    fn new(brp_port: u16) -> Self {
-        Self {
-            // Same port the BRP server binds (this app's own `--brp-port`): the MCP tools
-            // proxy to *this* app's BRP over loopback.
-            brp_url: format!("http://127.0.0.1:{brp_port}"),
+    fn new(brp_port: u16, extra_tools: Vec<HarnessTool>) -> Self {
+        let client = BrpClient::new(brp_port);
+        let mut router = Self::tool_router();
+        for tool in extra_tools {
+            router.add_route(tool.into_route(client.clone()));
         }
+        Self { client, router }
     }
 }
 
@@ -144,24 +276,10 @@ impl GameTools {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, rmcp::ErrorData> {
-        let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-        let response = reqwest::Client::new()
-            .post(&self.brp_url)
-            .json(&body)
-            .send()
+        self.client
+            .call(method, params)
             .await
-            .map_err(|err| rmcp::ErrorData::internal_error(format!("brp unreachable: {err}"), None))?;
-        let envelope: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| rmcp::ErrorData::internal_error(format!("brp bad response: {err}"), None))?;
-        if let Some(error) = envelope.get("error") {
-            return Err(rmcp::ErrorData::internal_error(error.to_string(), None));
-        }
-        Ok(envelope
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
+            .map_err(|err| rmcp::ErrorData::internal_error(err, None))
     }
 
     async fn text_result(result: serde_json::Value) -> Result<CallToolResult, ErrorData> {
@@ -355,7 +473,10 @@ impl GameTools {
     }
 }
 
-#[rmcp::tool_handler]
+// `router = self.router`: the per-instance router includes the host's `extra_tools` (dynamic
+// routes added in `GameTools::new`), so `tools/list` and `tools/call` serve them alongside the
+// compile-time built-ins.
+#[rmcp::tool_handler(router = self.router)]
 impl rmcp::ServerHandler for GameTools {
     fn get_info(&self) -> ServerConfig {
         let mut info = ServerConfig::default();
