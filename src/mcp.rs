@@ -121,6 +121,15 @@ fn read_guide_body(guide: Option<String>, section: Option<String>) -> Result<Str
     }
 }
 
+/// The `plan_check` tool's parameters.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct PlanCheckParams {
+    /// The calls to pre-flight check: BRP method names (`"game/trigger"`) or objects
+    /// `{"method": "game/input", "params": {...}}` for methods whose precondition reads
+    /// params. Full method names, including the prefix.
+    pub calls: Vec<serde_json::Value>,
+}
+
 /// A loopback HTTP client to the app's BRP surface — the handle handed to every
 /// [`HarnessTool`] callback. Custom tools drive the app the same way the built-in ones do:
 /// JSON-RPC methods over `127.0.0.1:<brp_port>` (built-ins like `bevy/query` work, and so do
@@ -516,6 +525,20 @@ impl GameTools {
     ) -> Result<CallToolResult, ErrorData> {
         let text = read_guide_body(guide, section)?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    /// Pre-flight check for a sequence of intended BRP calls. Params: `calls` — a list of bare
+    /// method names or `{method, params}` objects. Reports per call whether it would pass, and
+    /// for unknown methods or methods with a declared, currently-unmet precondition, why.
+    #[rmcp::tool(description = "Pre-flight check a sequence of intended calls BEFORE sending them. `calls` is a list of BRP method names (e.g. \"game/trigger\") or objects {\"method\": \"game/input\", \"params\": {...}}. Returns per-call ok:true, or ok:false with the reason (unknown method; declared precondition unmet — e.g. game/input requires an in-game local player, game/screenshot requires rendering). Methods without a declared precondition report ok:true with precondition:none — the harness can only vouch for what the host declared. Use this to plan a multi-step flow and catch state-machine mistakes cheaply.")]
+    async fn plan_check(
+        &self,
+        Parameters(PlanCheckParams { calls }): Parameters<PlanCheckParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let result = self
+            .brp(&self.method("plan_check"), json!({ "calls": calls }))
+            .await?;
+        Self::text_result(result).await
     }
 
     /// Dumps the UI tree: labeled rects + text for every visible UI node, in screenshot pixel

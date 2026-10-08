@@ -57,7 +57,11 @@ Three layers:
      the resources every frame).
 3. **MCP server** (`rmcp`, Streamable HTTP, stateless) on `127.0.0.1:15710/mcp`: tools
    `client_info`, `game_state`, `ui_tree`, `screenshot`, `keyboard_input`, `gamepad_input`,
-   `mouse_input`, `read_guide` — thin proxies to the BRP methods over loopback HTTP.
+   `mouse_input`, `plan_check`, `read_guide` — thin proxies to the BRP methods over loopback
+   HTTP. `plan_check` pre-flights an intended call sequence against **declared preconditions**
+   (`register_game_method_with_precondition`; the built-in `screenshot` declares one too), so
+   an agent catches state-machine mistakes — "play before connect", "screenshot with no
+   rendering" — before sending anything.
    `read_guide` serves the agent guides bundled into the binary
    (`docs/agents/skills/playtest.md`, `docs/agents/skills/bugreport.md`, `AGENTS.md`,
    `README.md`) — an agent connected to the MCP server can

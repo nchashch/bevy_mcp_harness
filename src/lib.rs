@@ -53,6 +53,29 @@
 //!    }
 //!    ```
 //!
+//!    Methods can declare a **precondition** (`register_game_method_with_precondition`) — a
+//!    `&World` (+ intended params) check surfaced by the `{prefix}/plan_check` pre-flight
+//!    method and its MCP `plan_check` tool, so an agent can verify a multi-step sequence
+//!    would pass before sending it:
+//!
+//!    ```no_run
+//!    # use bevy::prelude::*;
+//!    # use bevy_mcp_harness::{register_game_method_with_precondition, PreconditionFn};
+//!    # let mut app = App::new();
+//!    # fn my_game_state(_: In<Option<serde_json::Value>>, world: &mut World) -> bevy::remote::BrpResult {
+//!    #     Ok(serde_json::json!({}).into())
+//!    # }
+//!    # fn in_lobby(world: &World, _params: Option<&serde_json::Value>) -> Result<(), String> {
+//!    #     Ok(())
+//!    # }
+//!    register_game_method_with_precondition(
+//!        &mut app,
+//!        "game/my_state",
+//!        Some(std::sync::Arc::new(in_lobby) as PreconditionFn),
+//!        my_game_state,
+//!    );
+//!    ```
+//!
 //! 2. **Custom MCP tools** — pass [`HarnessTool`]s via [`McpHarnessConfig::extra_tools`]. The
 //!    callback runs on the MCP server thread with parsed arguments and a [`BrpClient`]; the
 //!    conventional shape proxies to a custom BRP method like the one above:
@@ -142,6 +165,16 @@ pub type StateSnapshotFn = Arc<dyn Fn(&mut World) -> serde_json::Value + Send + 
 /// HTML-markup UI's click hooks, say). `bevy_ui::Interaction` holders are always reported
 /// clickable; this hook adds to them.
 pub type ClickableFn = Arc<dyn Fn(&World, Entity) -> bool + Send + Sync>;
+
+/// A declared precondition for a BRP method, checked by `plan_check` (pre-flight) before the
+/// agent burns a call on a method that would fail. `world` is the app's world; `params` is the
+/// params object the agent intends to send (`None` when the call carries none) — event-shaped
+/// methods key their requirements off it. `Err(reason)` is the human-readable failure the agent
+/// would hit.
+///
+/// Declared preconditions are **advisory**: `plan_check` reports them, but calling the method
+/// still runs its own checks (the handler's own errors remain the source of truth).
+pub type PreconditionFn = Arc<dyn Fn(&World, Option<&serde_json::Value>) -> Result<(), String> + Send + Sync>;
 
 /// Harness configuration, inserted as a resource at plugin build. `Default` is the plain
 /// windowed setup (tool surfaces on the default ports, screenshots into
@@ -312,15 +345,37 @@ pub fn register_game_method<S, M>(
 where
     S: IntoSystem<In<Option<serde_json::Value>>, BrpResult, M> + Send + Sync + 'static,
 {
+    register_game_method_with_precondition(app, name, None, system)
+}
+
+/// [`register_game_method`] with a declared [`PreconditionFn`] — surfaced by the
+/// `{prefix}/plan_check` pre-flight method (and its MCP `plan_check` tool) so an agent can
+/// check which calls in an intended sequence would fail, and why, **before** sending them.
+/// Advisory only: the method's own checks remain the source of truth at call time.
+pub fn register_game_method_with_precondition<S, M>(
+    app: &mut App,
+    name: impl Into<String>,
+    precondition: Option<PreconditionFn>,
+    system: S,
+) -> SystemId<In<Option<serde_json::Value>>, BrpResult>
+where
+    S: IntoSystem<In<Option<serde_json::Value>>, BrpResult, M> + Send + Sync + 'static,
+{
     let name = name.into();
     let id = app.register_system(system);
     match app.world_mut().get_resource_mut::<bevy::remote::RemoteMethods>() {
         Some(mut methods) => {
-            methods.insert(name, bevy::remote::RemoteMethodSystemId::Instant(id));
+            methods.insert(name.clone(), bevy::remote::RemoteMethodSystemId::Instant(id));
         }
         None => error!(
             "register_game_method({name}): no RemoteMethods resource — add BevyMcpHarnessPlugin (or RemotePlugin) first"
         ),
+    }
+    if let (Some(precondition), Some(mut preconditions)) = (
+        precondition,
+        app.world_mut().get_resource_mut::<brp::GamePreconditions>(),
+    ) {
+        preconditions.0.insert(name.clone(), precondition);
     }
     id
 }
@@ -441,6 +496,7 @@ impl Plugin for BevyMcpHarnessPlugin {
 
         app.insert_resource(config.clone());
         app.init_resource::<brp::LastServedCapture>();
+        app.init_resource::<brp::GamePreconditions>();
 
         let state_method = app.register_system(brp::game_state_method);
         let screenshot_start = app.register_system(brp::screenshot_start_method);
@@ -451,6 +507,7 @@ impl Plugin for BevyMcpHarnessPlugin {
         let ui_method = app.register_system(brp::ui_dump_method);
         let client_info_method = app.register_system(brp::client_info_method);
         let cameras_method = app.register_system(brp::cameras_method);
+        let plan_check_method = app.register_system(brp::plan_check_method);
         let mut methods = app
             .world_mut()
             .resource_mut::<bevy::remote::RemoteMethods>();
@@ -468,6 +525,15 @@ impl Plugin for BevyMcpHarnessPlugin {
         methods.insert(format!("{prefix}/ui"), instant(ui_method));
         methods.insert(format!("{prefix}/client_info"), instant(client_info_method));
         methods.insert(format!("{prefix}/cameras"), instant(cameras_method));
+        methods.insert(format!("{prefix}/plan_check"), instant(plan_check_method));
+        // The one built-in with a meaningful declared precondition — a screenshot host that
+        // can't render (or has no capture target) fails before the agent burns a poll cycle.
+        app.world_mut()
+            .resource_mut::<brp::GamePreconditions>()
+            .0.insert(
+                format!("{prefix}/screenshot"),
+                Arc::new(brp::screenshot_precondition),
+            );
 
         mcp::start_mcp_server(
             config.brp_port,

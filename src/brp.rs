@@ -4,7 +4,7 @@
 //! game-specific methods (`game/input` action mocks, `game/select`, `game/trigger`,
 //! `game/levels`, `game/select_level` — all bound to that prototype's own crates).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use bevy::camera::RenderTarget;
@@ -19,7 +19,37 @@ use bevy::ui::{ComputedUiTargetCamera, UiGlobalTransform, UiStack};
 use serde_json::json;
 
 use crate::headless::CaptureTarget;
-use crate::{McpHarnessConfig, NoRenderMode};
+use crate::{McpHarnessConfig, NoRenderMode, PreconditionFn};
+
+/// Declared preconditions by full BRP method name (`{prefix}/name`), populated by
+/// [`crate::register_game_method_with_precondition`] and the harness's own built-ins, read by
+/// the `{prefix}/plan_check` pre-flight method.
+#[derive(Resource, Default)]
+pub(crate) struct GamePreconditions(pub HashMap<String, PreconditionFn>);
+
+/// The built-in `screenshot` precondition: rendering must be enabled (no `NoRenderMode`) and
+/// a capture target must exist (offscreen texture, or a primary window in windowed sessions).
+pub(crate) fn screenshot_precondition(
+    world: &World,
+    _params: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if world.get_resource::<NoRenderMode>().is_some() {
+        return Err(
+            "no rendering enabled (no_render): screenshots are unavailable; use game/ui for \
+             on-screen content and game/state for ground truth"
+                .to_owned(),
+        );
+    }
+    let has_window = world
+        .iter_entities()
+        .any(|entity| entity.get::<bevy::window::PrimaryWindow>().is_some());
+    if world.get_resource::<CaptureTarget>().is_none() && !has_window {
+        return Err(
+            "no capture target (no offscreen target configured and no primary window)".to_owned(),
+        );
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // game/state
@@ -83,6 +113,82 @@ pub(crate) fn client_info_method(_params: In<Option<serde_json::Value>>, world: 
         payload["host"] = host(world);
     }
     Ok(payload)
+}
+
+/// `{prefix}/plan_check` — pre-flight check for a sequence of intended calls. Params:
+/// `{"calls": ["{prefix}/trigger", {"method": "{prefix}/input", "params": {...}}, …]}` — each
+/// entry is a bare method name or an object with `method` + optional `params`. For every call
+/// the response reports `ok: true`, or `ok: false` with the `reason` the call would fail with
+/// (unknown method; declared precondition unmet). Methods without a declared precondition
+/// report `ok: true` with `"precondition": "none"` — `plan_check` can only vouch for what the
+/// host declared; the method's own checks remain the source of truth.
+pub(crate) fn plan_check_method(
+    params: In<Option<serde_json::Value>>,
+    world: &mut World,
+) -> BrpResult {
+    use bevy::remote::RemoteMethods;
+
+    let calls = params
+        .0
+        .as_ref()
+        .and_then(|p| p.get("calls"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| BrpError::internal("missing params.calls (array of method names or {method, params} objects)"))?;
+
+    let methods = world.resource::<RemoteMethods>();
+    let preconditions = world.resource::<GamePreconditions>();
+
+    let mut results = Vec::new();
+    let mut all_ok = true;
+    for call in calls {
+        let (name, intended_params) = match call {
+            serde_json::Value::String(name) => (name.clone(), None),
+            obj @ serde_json::Value::Object(_) => (
+                obj.get("method")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                obj.get("params").cloned(),
+            ),
+            other => {
+                all_ok = false;
+                results.push(json!({
+                    "call": other, "ok": false,
+                    "reason": "call entries must be strings or {method, params} objects",
+                }));
+                continue;
+            }
+        };
+
+        let mut entry = json!({ "call": name });
+        if methods.get(&name).is_none() {
+            all_ok = false;
+            entry["ok"] = json!(false);
+            entry["reason"] = json!(format!(
+                "unknown method (registered: {:?})",
+                methods.methods()
+            ));
+        } else if let Some(precondition) =
+            preconditions.0.get(&name).cloned()
+        {
+            match precondition(world, intended_params.as_ref()) {
+                Ok(()) => {
+                    entry["ok"] = json!(true);
+                }
+                Err(reason) => {
+                    all_ok = false;
+                    entry["ok"] = json!(false);
+                    entry["reason"] = json!(reason);
+                }
+            }
+        } else {
+            entry["ok"] = json!(true);
+            entry["precondition"] = json!("none");
+        }
+        results.push(entry);
+    }
+
+    Ok(json!({ "all_ok": all_ok, "calls": results }))
 }
 
 /// `game/cameras` — lists every camera: entity id (usable as `game/screenshot`'s `camera`

@@ -607,12 +607,17 @@ reports go in the agent-facing area only. **[p19]** enforces this as
    line in the log (§2).
 4. `game/client_info` first (§1a).
 5. `game/ui` + `game/state` (screenshot only if the task is visual — §6).
-6. Drive with `game/gamepad`/`game/keyboard`/`game/mouse`; sample `game/state`
+6. Planning a multi-step flow? Pre-flight it with `{prefix}/plan_check`
+   (`"game/plan_check"`) — it reports which calls in the sequence would fail
+   right now, and why (declared preconditions: in-game, connected, target
+   selected). Re-check after state changes instead of learning the state
+   machine by failed calls.
+7. Drive with `game/gamepad`/`game/keyboard`/`game/mouse`; sample `game/state`
    and BRP queries after each action. Screenshots only on explicit request or
    for inherently visual checks; report any data-surface gap you hit (§9).
-7. Capture logs; teardown when done (or leave the process for the user, saying
+8. Capture logs; teardown when done (or leave the process for the user, saying
    which processes are yours).
-8. Write the playtest report and its index entry (§9).
+9. Write the playtest report and its index entry (§9).
 
 ## 11. Host-app integration checklist
 

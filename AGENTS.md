@@ -40,8 +40,9 @@ Three layers, in one data flow:
    attached any time.
 2. **Custom BRP methods** (`src/brp.rs`): the game tools — `game/state`, `game/client_info`,
    `game/cameras`, `game/screenshot` + `game/screenshot/get`, `game/ui`, `game/gamepad`,
-   `game/keyboard`, `game/mouse`. Handlers are plain systems registered into `RemoteMethods` in
-   `BevyMcpHarnessPlugin::build`.
+   `game/keyboard`, `game/mouse`, `game/plan_check` (pre-flight for an intended call
+   sequence against declared preconditions). Handlers are plain systems registered into
+   `RemoteMethods` in `BevyMcpHarnessPlugin::build`.
 3. **MCP server** (`src/mcp.rs`): rmcp Streamable HTTP, stateless, on `127.0.0.1:15710/mcp`.
    Tools (`client_info`, `game_state`, `ui_tree`, `screenshot`, `keyboard_input`,
    `gamepad_input`, `mouse_input`, `read_guide`, plus host `extra_tools`) proxy to BRP over
@@ -59,12 +60,16 @@ composition and the smoke-test fixture.
 
 Both work after the plugin was added as a normal cargo dependency — no forking:
 
-- **Custom BRP methods**: `app.register_system(...)` + insert into
-  `bevy::remote::RemoteMethods` with a `RemoteMethodSystemId::Instant` id. Must run where `&mut
-  App` is available (`main` after `add_plugins`, or a plugin) — **not inside a system**. Name
-  custom methods `game/<something>`. Gotcha: filter the method's queries on the game's own
-  marker components — the harness's cursor overlay spawns `ComputedNode`/`UiGlobalTransform`
-  UI nodes that otherwise pollute `.single()`.
+- **Custom BRP methods**: `register_game_method(app, "game/x", system)` — one line per method
+  (warns when `RemoteMethods` is missing). `register_game_method_with_precondition` adds a
+  declared [`PreconditionFn`] (`fn(&World, params) -> Result<(), String>`) surfaced by the
+  `{prefix}/plan_check` pre-flight method + MCP `plan_check` tool, so an agent can verify an
+  intended call sequence would pass before sending it (advisory — the method's own checks
+  remain the source of truth). Handlers run in the main world with `&mut World` access. Must
+  be called where `&mut App` lives (`main` after the plugin, or a later plugin). Gotcha:
+  filter the method's queries on the game's own marker components — the harness's cursor
+  overlay spawns `ComputedNode`/`UiGlobalTransform` UI nodes that otherwise pollute
+  `.single()`.
 - **Custom MCP tools**: `McpHarnessConfig::extra_tools: Vec<HarnessTool>`. `HarnessTool::new`
   generates the input schema from the args struct (schemars), deserializes/validates arguments
   before invoking, and hands the callback a `BrpClient`. Conventional shape: the callback
