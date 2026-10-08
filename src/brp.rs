@@ -324,15 +324,18 @@ fn newest_screenshot(dir: &Path) -> Option<PathBuf> {
 }
 
 /// `game/screenshot` — starts an async capture. The PNG is written into the configured
-/// screenshots directory (encoded by `save_encoded_to_disk`, async); poll
-/// `game/screenshot/get` until it reports `ready`. Optional params: `{"label": "..."}` for the
-/// filename, `{"crop": [x, y, w, h]}` to save only that sub-rect — in the same screenshot pixel
-/// space `game/ui` dumps, so "crop to a button's rect from the dump" just works. A crop costs
-/// the model fewer vision tokens (cost is dimension-driven) and, unlike a full frame, a small
-/// crop survives the provider's downscale unscaled — full effective resolution on the region
-/// of interest. The file PERSISTS (it is the human-browsable record of what the agent saw), so
-/// this also returns the path immediately. `{"camera": <entity id>}` (from `game/cameras`)
-/// temporarily raises that camera's draw order so the capture is its view.
+/// screenshots directory (encoded by `save_encoded_to_disk`, async) **at full resolution,
+/// uncropped** — the file is the human-browsable record and maps 1:1 onto the coordinate
+/// tables; poll `game/screenshot/get` until it reports `ready`. The request's `crop` and
+/// `max_dimension` shape only the *served view* (the poll's `png_base64` — what the agent
+/// looks at), applied at poll time by [`encode_served_view`]: `{"crop": [x, y, w, h]}` saves
+/// that sub-rect — in the same screenshot pixel space `game/ui` dumps, so "crop to a
+/// button's rect from the dump" just works — and `{"max_dimension": 640}` downscales the
+/// view's long edge (aspect preserved). Both exist to cut vision tokens on the agent's read;
+/// a cropped region keeps full effective resolution (crop before resize). The file PERSISTS
+/// (it is the human-browsable record of what the agent saw), so this also returns the path
+/// immediately. `{"camera": <entity id>}` (from `game/cameras`) temporarily raises that
+/// camera's draw order so the capture is its view.
 pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, world: &mut World) -> BrpResult {
     let label = params
         .0
@@ -471,7 +474,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         physics_debug::apply_physics_debug(world)?;
         world
             .spawn(capture_target)
-            .observe(save_encoded_to_disk(path.clone(), crop, max_dimension))
+            .observe(save_encoded_to_disk(path.clone()))
             .observe(restore_camera_order);
         return Ok(json!({
             "status": "capturing",
@@ -503,8 +506,6 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         });
         world.insert_resource(render_debug::PendingWireframeCapture {
             path: path.clone(),
-            crop,
-            max_dimension,
             previous_config,
             frames_since_apply: 0,
         });
@@ -555,8 +556,6 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
             missing_prepasses: missing,
             capture: Some(render_debug::EncodedCapture {
                 path: path.clone(),
-                crop,
-                max_dimension,
             }),
             frames_since_apply: 0,
             overlay_applied: false,
@@ -579,7 +578,7 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
 
     world
         .spawn(capture_target)
-        .observe(save_encoded_to_disk(path.clone(), crop, max_dimension))
+        .observe(save_encoded_to_disk(path.clone()))
         .observe(restore_camera_order);
     Ok(json!({
         "status": "capturing",
@@ -651,57 +650,28 @@ fn parse_crop(value: &serde_json::Value) -> Option<[u32; 4]> {
         .map(|parts| [parts[0], parts[1], parts[2], parts[3]])
 }
 
-/// `Screenshot`'s built-in `save_to_disk`'s crop-capable twin: encodes the captured frame's
-/// sub-rect `crop` (or the whole frame when `None`) to `<path>` as PNG, clamping the rect to
-/// the frame's bounds so an out-of-range crop degrades to the intersection instead of
-/// panicking. Mirrors `save_to_disk`'s HDR-safety (`to_rgb8` drops the alpha channel). The
-/// capture itself is always of the full render target — the crop is applied at encode time.
-/// `max_dimension` (when set) downscales the *encoded* result to fit within that many pixels
-/// on the long edge (aspect preserved, Lanczos3) — overview reads cost fewer vision tokens;
-/// the capture itself stays full-resolution.
-fn save_encoded_to_disk(
-    path: impl AsRef<Path>,
-    crop: Option<[u32; 4]>,
-    max_dimension: Option<u32>,
-) -> impl FnMut(On<ScreenshotCaptured>) {
+/// Encodes the captured frame to `<path>` as PNG, unmodified — the persistent,
+/// human-browsable record is always the full-resolution, uncropped capture. The agent's
+/// token-efficient view (crop/downscale from the request params) is applied at poll time by
+/// [`encode_served_view`], never to this file: a report annotator works on the file and the
+/// coordinate tables (`entities`, `game/ui` rects) map onto it 1:1. Mirrors `Screenshot`'s
+/// built-in `save_to_disk`'s HDR-safety (`to_rgb8` drops the alpha channel).
+fn save_encoded_to_disk(path: impl AsRef<Path>) -> impl FnMut(On<ScreenshotCaptured>) {
     let path = path.as_ref().to_owned();
     move |captured: On<ScreenshotCaptured>| {
         let Ok(dyn_img) = captured.image.clone().try_into_dynamic() else {
             error!(
-                "screenshot crop: unsupported capture format at {}",
+                "screenshot save: unsupported capture format at {}",
                 path.display()
             );
             return;
         };
-        let rgb = dyn_img.to_rgb8();
-        let cropped = match crop {
-            None => image::DynamicImage::ImageRgb8(rgb),
-            Some([x, y, w, h]) => {
-                let x = x.min(rgb.width().saturating_sub(1));
-                let y = y.min(rgb.height().saturating_sub(1));
-                let w = w.min(rgb.width() - x).max(1);
-                let h = h.min(rgb.height() - y).max(1);
-                image::DynamicImage::ImageRgb8(image::imageops::crop_imm(&rgb, x, y, w, h).to_image())
-            }
-        };
-        let encoded = match max_dimension {
-            Some(max) => {
-                let long = cropped.width().max(cropped.height());
-                (long > max).then(|| {
-                    let scale = max as f64 / long as f64;
-                    (
-                        (cropped.width() as f64 * scale).round().max(1.0) as u32,
-                        (cropped.height() as f64 * scale).round().max(1.0) as u32,
-                    )
-                })
-            }
-            None => None,
-        }
-        .map(|(w, h)| cropped.resize_exact(w, h, image::imageops::FilterType::Lanczos3))
-        .unwrap_or(cropped);
-        match encoded.save_with_format(&path, image::ImageFormat::Png) {
+        let encoded = dyn_img.to_rgb8();
+        match image::DynamicImage::ImageRgb8(encoded.clone())
+            .save_with_format(&path, image::ImageFormat::Png)
+        {
             Ok(_) => info!(
-                "Screenshot saved to {} (crop: {crop:?}, max_dimension: {max_dimension:?}, {}×{})",
+                "Screenshot saved to {} (full frame, {}×{})",
                 path.display(),
                 encoded.width(),
                 encoded.height()
@@ -709,6 +679,52 @@ fn save_encoded_to_disk(
             Err(e) => error!("Cannot save screenshot, IO error: {e}"),
         }
     }
+}
+
+/// The agent's view of a capture, built at poll time from the full-resolution file on disk:
+/// the request's `crop` sub-rect (clamped to the frame's bounds — an out-of-range crop
+/// degrades to the intersection instead of panicking), then a `max_dimension` downscale to
+/// fit the long edge (aspect preserved, Lanczos3). The crop is applied before the resize so a
+/// cropped region keeps full effective resolution. Returns `(png_bytes, [w, h])`; `None` when
+/// the file isn't decodable PNG (served as-is by the caller in that case).
+fn encode_served_view(
+    bytes: &[u8],
+    crop: Option<[u32; 4]>,
+    max_dimension: Option<u32>,
+) -> Option<(Vec<u8>, [u32; 2])> {
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let rgb = decoded.to_rgb8();
+    let cropped = match crop {
+        None => image::DynamicImage::ImageRgb8(rgb),
+        Some([x, y, w, h]) => {
+            let x = x.min(rgb.width().saturating_sub(1));
+            let y = y.min(rgb.height().saturating_sub(1));
+            let w = w.min(rgb.width() - x).max(1);
+            let h = h.min(rgb.height() - y).max(1);
+            image::DynamicImage::ImageRgb8(image::imageops::crop_imm(&rgb, x, y, w, h).to_image())
+        }
+    };
+    let resized = match max_dimension {
+        Some(max) => {
+            let long = cropped.width().max(cropped.height());
+            (long > max).then(|| {
+                let scale = max as f64 / long as f64;
+                (
+                    (cropped.width() as f64 * scale).round().max(1.0) as u32,
+                    (cropped.height() as f64 * scale).round().max(1.0) as u32,
+                )
+            })
+        }
+        None => None,
+    }
+    .map(|(w, h)| cropped.resize_exact(w, h, image::imageops::FilterType::Lanczos3))
+    .unwrap_or(cropped);
+    let size = [resized.width(), resized.height()];
+    let mut out = std::io::Cursor::new(Vec::new());
+    resized
+        .write_to(&mut out, image::ImageFormat::Png)
+        .ok()
+        .map(|_| (out.into_inner(), size))
 }
 
 /// The pixels of the last capture `game/screenshot/get` served in full (hash of the PNG bytes).
@@ -913,11 +929,25 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
     let state = game_state_snapshot(world);
     let entities = screenshot_get_entities(world);
 
-    // Coordinate alignment (see [`screenshot_get_alignment`]): the coordinate tables
-    // (`entities`, `game/ui` rects) are in full-resolution capture space; the PNG on disk may
-    // be cropped and/or downscaled (`max_dimension`). Without this block a post-hoc annotator
-    // silently draws at the wrong scale.
-    let alignment = screenshot_get_alignment(world, &path, &bytes);
+    // The agent's view: the request's crop/downscale applied at poll time to the
+    // full-resolution file (which `save_encoded_to_disk` wrote unmodified). Params come from
+    // [`LastCaptureParams`], matched by path so a stale entry can't shape the wrong capture.
+    let request = world
+        .get_resource::<LastCaptureParams>()
+        .filter(|params| params.path == path)
+        .map(|params| (params.crop, params.max_dimension));
+    let (crop, max_dimension) = request.unwrap_or((None, None));
+    let view = encode_served_view(&bytes, crop, max_dimension);
+    let (view_bytes, view_size) = view
+        .map(|(bytes, size)| (bytes, Some(size)))
+        .unwrap_or_else(|| (bytes.clone(), None));
+
+    // Coordinate alignment (see [`screenshot_get_alignment`]): the file on disk is always the
+    // full-resolution capture (tables map onto it 1:1); the served view may be a
+    // cropped/downscaled rendering of it. Without this block a post-hoc annotator silently
+    // draws at the wrong scale.
+    let alignment =
+        screenshot_get_alignment(world, &bytes, view_size, crop, max_dimension);
 
     // Unchanged-frame suppression: PNG bytes are a deterministic function of the frame
     // (same encoder, same pixels → same bytes), so hashing the file hashes the frame.
@@ -943,7 +973,7 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
 
     {
         use base64::Engine as _;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&view_bytes);
         let sidecar = path.with_extension("json");
         if !sidecar.exists() {
             // `entities` and `alignment` are included so the sidecar is a self-contained
@@ -973,23 +1003,31 @@ pub(crate) fn screenshot_get_method(_params: In<Option<serde_json::Value>>, worl
 }
 
 /// The coordinate-alignment block for a capture (`screenshot/get` responses and sidecars):
-/// how the PNG on disk maps onto the full-resolution capture space the coordinate tables
-/// (`entities`, `game/ui` rects, `game/mouse move_to`) are measured in.
+/// how the coordinate tables (`entities`, `game/ui` rects, `game/mouse move_to`) relate to
+/// the two renderings of a capture.
 ///
-/// - `png_size` — the encoded PNG's own dimensions (parsed from its IHDR header, exact).
-/// - `capture_size` — the render target's full resolution (headless: the offscreen texture;
-///   `null` in windowed sessions, where the harness never reads window state).
-/// - `crop` / `max_dimension` — the capture request's params (from [`LastCaptureParams`];
-///   `null`/omitted when the polled file isn't the most recent request's path).
-/// - `coordinate_scale` — multiply coordinate-table values by this to land on the PNG:
-///   `crop.w / png.w` when cropped (the crop is applied before any resize), else
-///   `capture.w / png.w`, else 1.0 (a full-resolution uncropped capture). `null`
-///   only when the scale is genuinely unknowable: a windowed, uncropped, downscaled capture
-///   (the harness doesn't know the window's pixel size).
+/// - `png_size` — the file on disk's dimensions (parsed from its IHDR header, exact). The
+///   file is ALWAYS the full-resolution, uncropped capture, so the tables map onto it 1:1 —
+///   annotators draw directly on the file with no scaling.
+/// - `capture_size` — the render target's resolution (headless: the offscreen texture;
+///   `null` in windowed sessions, where the harness never reads window state). Same space as
+///   `png_size`.
+/// - `view` — the geometry of the *served* base64 image (`png_base64`), which may be a
+///   cropped/downscaled rendering of the file (the agent's token-efficient look):
+///   `size` `[w,h]` (null when the file wasn't decodable and the raw bytes were served
+///   instead), the request's `crop`/`max_dimension` (from [`LastCaptureParams`]; null when
+///   the polled file isn't the most recent request's path), and `coordinate_scale` —
+///   multiply table coordinates by it to land on the view: `(crop.w or capture.w) / view.w`.
+///   Coordinates also shift by the crop origin first (crop is applied before any resize).
+///   `null` only when the scale is genuinely unknowable: a windowed, uncropped, downscaled
+///   view (the harness doesn't know the window's pixel size).
+#[allow(clippy::too_many_arguments)]
 fn screenshot_get_alignment(
     world: &mut World,
-    path: &Path,
     bytes: &[u8],
+    view_size: Option<[u32; 2]>,
+    crop: Option<[u32; 4]>,
+    max_dimension: Option<u32>,
 ) -> serde_json::Value {
     // PNG IHDR: 8-byte signature + 4-byte length + "IHDR" + 13 data bytes; width/height are
     // u32 big-endian at offsets 16 and 20. Every capture is PNG (`save_encoded_to_disk`).
@@ -1005,28 +1043,23 @@ fn screenshot_get_alignment(
                 .and_then(|images| images.get(&target.0))
                 .map(|image| [image.size().x, image.size().y])
         });
-    let request = world
-        .get_resource::<LastCaptureParams>()
-        .filter(|params| params.path == path);
-    let crop = request.and_then(|params| params.crop);
-    let max_dimension = request.and_then(|params| params.max_dimension);
-    let scale = png_size
-        .filter(|size| size[0] > 0)
-        .map(|png| {
-            let full_width = crop
-                .map(|crop| crop[2])
-                .filter(|&w| w > 0)
-                .or(capture_size.map(|size| size[0]))
-                .filter(|&w| w > 0);
-            full_width.map(|full| full as f64 / png[0] as f64)
-        })
-        .unwrap_or(None);
+    let full_width = crop
+        .map(|crop| crop[2])
+        .filter(|&w| w > 0)
+        .or_else(|| capture_size.map(|size| size[0]).filter(|&w| w > 0));
+    let view_scale = match (view_size, full_width) {
+        (Some(view), Some(full)) if view[0] > 0 => Some(full as f64 / view[0] as f64),
+        _ => None,
+    };
     json!({
         "png_size": png_size,
         "capture_size": capture_size,
-        "crop": crop,
-        "max_dimension": max_dimension,
-        "coordinate_scale": scale,
+        "view": {
+            "size": view_size,
+            "crop": crop,
+            "max_dimension": max_dimension,
+            "coordinate_scale": view_scale,
+        },
     })
 }
 
@@ -1163,8 +1196,6 @@ pub(crate) mod render_debug {
     #[derive(Clone)]
     pub(crate) struct EncodedCapture {
         pub path: PathBuf,
-        pub crop: Option<[u32; 4]>,
-        pub max_dimension: Option<u32>,
     }
 
     /// The camera state to restore after a debug-view capture: prepass markers the harness
@@ -1259,7 +1290,7 @@ pub(crate) mod render_debug {
                     .clone()
                     .into(),
             )))
-            .observe(save_encoded_to_disk(capture.path, capture.crop, capture.max_dimension))
+            .observe(save_encoded_to_disk(capture.path))
             .observe(restore_render_debug);
         world.remove_resource::<PendingDebugView>();
     }
@@ -1303,8 +1334,6 @@ pub(crate) mod render_debug {
     #[derive(Resource)]
     pub(crate) struct PendingWireframeCapture {
         pub path: PathBuf,
-        pub crop: Option<[u32; 4]>,
-        pub max_dimension: Option<u32>,
         pub previous_config: Option<bevy::pbr::wireframe::WireframeConfig>,
         pub frames_since_apply: u32,
     }
@@ -1328,8 +1357,6 @@ pub(crate) mod render_debug {
             return;
         }
         let path = pending.path.clone();
-        let crop = pending.crop;
-        let max_dimension = pending.max_dimension;
         let previous_config = pending.previous_config.clone();
         drop(pending);
 
@@ -1343,7 +1370,7 @@ pub(crate) mod render_debug {
                     .clone()
                     .into(),
             )))
-            .observe(save_encoded_to_disk(path, crop, max_dimension))
+            .observe(save_encoded_to_disk(path))
             .observe(wireframe_restore);
         world.remove_resource::<PendingWireframeCapture>();
     }

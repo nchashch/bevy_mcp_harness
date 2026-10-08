@@ -87,12 +87,12 @@ Required fields:
    entity/component listings. Attach what you saw, not a paraphrase. When a
    screenshot is genuinely the evidence (a rendering defect), attach an
    **annotated copy** — marks drawn from the capture's machine-readable geometry
-   (`entities` table, `game/ui` rects, scaled by the response's
-   `alignment.coordinate_scale`), saved as `<name>-annotated.png` beside the
-   untouched original, with the caption stating what the marks mean and where the
-   coordinates came from. Annotation is the illustration; the exact numbers
-   (bounding box, depth, state values) belong in the report prose. Convention and
-   working example: `docs/agents/skills/playtest.md` §6a.
+   (`entities` table, `game/ui` rects) onto the full-resolution file on disk,
+   which the coordinate tables map onto 1:1, saved as `<name>-annotated.png`
+   beside the untouched original, with the caption stating what the marks mean
+   and where the coordinates came from. Annotation is the illustration; the exact
+   numbers (bounding box, depth, state values) belong in the report prose.
+   Convention and working example: `docs/agents/skills/playtest.md` §6a.
 5. **Root cause** — only what is *confirmed*. Hypotheses go here explicitly
    labeled `Hypothesis (not confirmed)` with the discriminating experiment that
    would confirm them. If you ran an ablation (stash the candidate fix, re-test),

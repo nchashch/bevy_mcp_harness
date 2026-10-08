@@ -38,10 +38,12 @@ Three layers:
    - `game/client_info` — mode flags + surface ports; call first on a fresh session.
    - `game/cameras` — every camera: entity id (usable as `game/screenshot`'s `camera` param),
      position, look angles, active flag.
-   - `game/screenshot` / `game/screenshot/get` — async capture → PNG on disk (persistent,
-     human-browsable, with a `.json` state sidecar) → base64 on poll. Optional `label`,
-     `crop` `[x,y,w,h]`, and `camera` params. Pixel-identical polls answer `unchanged: true`
-     without re-sending the image. With the `render_debug` feature, a `debug_view` param
+   - `game/screenshot` / `game/screenshot/get` — async capture → full-resolution PNG on disk
+     (persistent, human-browsable, with a `.json` state sidecar) → base64 on poll. Optional
+     `label`, `crop` `[x,y,w,h]`, and `camera` params; `crop` and `max_dimension` shape only
+     the **served view** (the token-efficient image the agent looks at) — the file on disk is
+     always the full-resolution, uncropped frame. Pixel-identical polls answer `unchanged:
+     true` without re-sending the image. With the `render_debug` feature, a `debug_view` param
      renders rendering internals into the capture (`depth`, `normals`, `motion_vectors`,
      `deferred*`, `depth_pyramid`, `wireframe`; `physics` collider gizmos under
      `physics_debug` — see [ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)).

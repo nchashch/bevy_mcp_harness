@@ -530,12 +530,15 @@ pub struct ScreenshotParams {
     /// configured screenshots directory.
     pub label: Option<String>,
     /// Optional `[x, y, w, h]` sub-rect to capture, in the same screenshot pixel space game/ui
-    /// dumps (e.g. a button's rect). A crop costs fewer vision tokens and keeps full effective
+    /// dumps (e.g. a button's rect). Shapes the served image only — the file on disk is always
+    /// the full-resolution frame. A crop costs fewer vision tokens and keeps full effective
     /// resolution on the region of interest. Clamped to frame bounds.
     pub crop: Option<Vec<f64>>,
-    /// Optional overview downscale: the encoded PNG fits within this many pixels on its long
-    /// edge (aspect preserved, clamped 64..=4096). Use ~640 for overview checks; omit for
-    /// full-resolution detail reads.
+    /// Optional overview downscale: the served image (what you see) fits within this many
+    /// pixels on its long edge (aspect preserved, clamped 64..=4096). Use ~640 for overview
+    /// checks; omit for full-resolution detail reads. The file saved on disk is ALWAYS the
+    /// full-resolution frame either way — `alignment.png_size` reports it, and reports
+    /// should embed that file, not the downscaled view.
     pub max_dimension: Option<u32>,
     /// Optional render-debug views (requires the host to enable the harness's `render_debug`
     /// feature): a list of mode names to capture. Each mode renders into a separate PNG.

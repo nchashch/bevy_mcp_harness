@@ -11,6 +11,18 @@ The design history behind these changes lives in
 
 ## [Unreleased]
 
+### Changed
+
+- **Captures always save the full-resolution frame.** The file on disk is
+  never cropped or downscaled: `crop` and `max_dimension` now shape only the
+  *served view* (`png_base64` — the token-efficient image the agent looks at),
+  applied at poll time to the full-res file. The report/human artifact is the
+  high-res file, and the coordinate tables (`entities`, `game/ui` rects) map
+  onto it 1:1 — annotators draw directly on it, no scaling math. `alignment`
+  reshaped accordingly: `png_size` (the full-res file) + `view` `{size, crop,
+  max_dimension, coordinate_scale}` (the served view's geometry). The annotated
+  capture flow (guide §6a) simplifies to draw-on-the-file.
+
 ## [0.3.0] - 2026-10-08
 
 ### Added

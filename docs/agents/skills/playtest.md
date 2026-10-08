@@ -136,8 +136,8 @@ Custom `game/*` methods provided by the harness (the host may register more — 
 | `game/state` | — | The **host-registered** state snapshot (app state, player position/health, whatever the game exposes). Empty object if the host registered no hook — that is a host-app gap, not a harness bug |
 | `game/client_info` | — | This host's effective launch configuration: `no_render`, ports, `screenshots_dir`, `screenshots_available`, offscreen `target_size`. Call first on a fresh session |
 | `game/cameras` | — | Lists camera entities and their poses — the ids `game/screenshot {"camera": <id>}` accepts |
-| `game/screenshot` | `{"label":"..."}`, `{"crop":[x,y,w,h]}`, `{"camera":<id>}`, `{"max_dimension":640}`, `{"debug_view":"depth"\|"normals"\|"motion_vectors"\|"wireframe"\|...}` optional | Async capture; PNG written into the configured screenshots dir (persistent, never consumed — the human-browsable record). `crop` saves only that sub-rect — same pixel space as `game/ui` rects, clamped to frame bounds. `max_dimension` downscales the **encoded** PNG to fit that many pixels on the long edge (aspect preserved) — ~640 for overview checks costs ~4× fewer vision tokens; `crop` is applied before the resize so a cropped region keeps full effective resolution. `debug_view` renders debug overlays into the capture: `depth` / `normals` / `motion_vectors` / `wireframe` / `deferred*` / `depth_pyramid` — the overlay + its prepass pipelines are applied deferred (a few warm-up frames) so the debug view appears on the FIRST capture; the camera restores after. Requires the `render_debug` cargo feature |
-| `game/screenshot/get` | — | `{"ready":true,"png_base64":...,"path":...,"state":{...game/state...},"entities":[...],"alignment":{...}}` for the newest capture. The `state` is sampled at poll time, so every capture arrives with its ground truth attached — never OCR the HUD. `entities` is the per-frame entity-projection table (same as `game/entities_on_screen`, but for the captured frame); `alignment` says how the PNG on disk maps onto the coordinate space (§6). The same payload is written to a `<capture>.json` sidecar next to the PNG, so the record is self-contained for post-hoc annotation. If the newest capture is pixel-identical to the last one served in full, responds `{"ready":true,"unchanged":true,"path","state","entities","alignment"}` WITHOUT `png_base64` — don't re-request; read the state |
+| `game/screenshot` | `{"label":"..."}`, `{"crop":[x,y,w,h]}`, `{"camera":<id>}`, `{"max_dimension":640}`, `{"debug_view":"depth"\|"normals"\|"motion_vectors"\|"wireframe"\|...}` optional | Async capture; the file written into the configured screenshots dir is **always the full-resolution, uncropped frame** (persistent, never consumed — the human-browsable record, and the thing to annotate/embed in reports: coordinate tables map onto it 1:1). `crop` and `max_dimension` shape only the **served view** (`png_base64` — what you look at): `crop` saves only that sub-rect — same pixel space as `game/ui` rects — and `max_dimension` downscales the view's long edge (aspect preserved) — ~640 for overview checks costs ~4× fewer vision tokens; `crop` is applied before the resize so a cropped region keeps full effective resolution. `debug_view` renders debug overlays into the capture: `depth` / `normals` / `motion_vectors` / `wireframe` / `deferred*` / `depth_pyramid` — the overlay + its prepass pipelines are applied deferred (a few warm-up frames) so the debug view appears on the FIRST capture; the camera restores after. Requires the `render_debug` cargo feature |
+| `game/screenshot/get` | — | `{"ready":true,"png_base64":...,"path":...,"state":{...game/state...},"entities":[...],"alignment":{...}}` for the newest capture. The `state` is sampled at poll time, so every capture arrives with its ground truth attached — never OCR the HUD. `entities` is the per-frame entity-projection table (same as `game/entities_on_screen`, but for the captured frame). `alignment` says how the coordinate tables map onto the file (`png_size` — always the full-res capture, 1:1) and onto the served view (`view.coordinate_scale`, `view.crop`, `view.size`). The same payload is written to a `<capture>.json` sidecar next to the PNG, so the record is self-contained for post-hoc annotation. If the newest capture is pixel-identical to the last one served in full, responds `{"ready":true,"unchanged":true,"path","state","entities","alignment"}` WITHOUT `png_base64` — don't re-request; read the state |
 | `game/ui` | `{"clickable_only":true}`, `{"text_contains":"Play"}`, `{"refresh":true}` optional | Accessibility-tree-style UI dump: every visible UI node's `rect` `[x,y,w,h]` **in the same pixel space `game/mouse move_to` consumes**, its text (button labels), `clickable: true` on interactive nodes (`bevy_ui::Interaction` holders), `interaction` (`Pressed`\|`Hovered`\|`Idle`), `pointer_hovered`, hovered-entity set, and the mocked pointer's position. Back-to-front render order. Read this to decide *what to click and where* — and crop screenshots to these rects — instead of estimating from pixels. **Headless caveat**: `interaction` stays `Idle` for all nodes on an offscreen target (bevy's `ui_focus_system` only updates `Interaction` for window-target cameras); `pointer_hovered`/`hovered_entities` are the reliable headless hover/press signal. **Unchanged suppression**: a re-read whose filtered node list is identical to the previous one answers `{unchanged: true, node_count, pointer, hovered_entities}` WITHOUT `nodes` — re-reads after inputs are cheap; pass `refresh: true` to force a full dump (e.g. after losing the earlier one to context compaction). Filters: `clickable_only` is the find-the-button read; `text_contains` matches case-insensitively |
 | `game/gamepad` | see §4a | Device-level gamepad mock (buttons/axes); drives UI navigation |
 | `game/keyboard` | see §4b | Device-level keyboard mock (`ButtonInput<KeyCode>`) |
@@ -481,12 +481,16 @@ your report (§9) instead of squelching it with screenshots.
 
 - `game/screenshot {"label":"ingame"}` →
   `<screenshots_dir>/<millistamp>-ingame.png` (persistent, never consumed —
-  the human-browsable record). Poll `game/screenshot/get` until `ready:true`
-  (~1–3s), or just `ls` the configured screenshots dir.
+  the human-browsable record, **always the full-resolution, uncropped
+  frame**). Poll `game/screenshot/get` until `ready:true` (~1–3s), or just
+  `ls` the configured screenshots dir.
 - In headless mode the capture reads the **shared offscreen texture** = exactly
-  what the agent "sees". `{"crop":[x,y,w,h]}` (read the rect off `game/ui`)
-  costs fewer vision tokens and keeps full effective resolution on the region of
-  interest. `{"camera": <id>}` renders one camera's view (its render target is
+  what the agent "sees". `{"crop":[x,y,w,h]}` (read the rect off `game/ui`) and
+  `{"max_dimension":640}` shape **only the served view** (`png_base64` — what
+  you look at, to cut vision tokens; crop is applied before the resize so a
+  cropped region keeps full effective resolution). The file on disk is never
+  cropped or downscaled — use it for annotation and report embeds.
+  `{"camera": <id>}` renders one camera's view (its render target is
   borrowed for one frame, then restored).
 - The response embeds the `game/state` payload sampled at poll time, the per-frame
   `entities` projection table, and an `alignment` block; the same payload is written to a
@@ -512,28 +516,26 @@ from the same tables `game/mouse` clicks in:
    bounding_box: [x,y,w,h], depth}`; UI element rects come from `game/ui`. Both are in
    full-resolution capture pixel space. Your reasoning decides *which* of them the annotation
    illustrates; the drawing itself is mechanical.
-2. **Check `alignment` before drawing.** `coordinate_scale` is the multiplier from
-   coordinate-space pixels to this PNG's pixels (1.0 for a full-resolution capture; e.g. 2.0
-   when `max_dimension: 640` downscaled a 1280-wide capture). Multiply table coordinates by
-   it. With a `crop`, coordinates first shift by the crop origin, then scale (crop is applied
-   before any resize). Simpler alternative when you control the capture: annotate a
-   full-resolution capture (no `max_dimension`, no `crop`) and downscale the *annotated
-   copy* afterwards.
+2. **Annotate the file on disk, not the served view.** The `<capture>.png` is ALWAYS the
+   full-resolution, uncropped frame, so the coordinate tables map onto it 1:1 — no scaling
+   math. The `png_base64` you were served may be a cropped/downscaled *view* (token-saving);
+   `alignment.view` (`size`, `crop`, `coordinate_scale`) documents it, but that's for
+   correlating what you saw, not for drawing. For a human report, embed the annotated
+   full-resolution file — optionally downscale the annotated *copy* afterwards if the report
+   needs lighter images.
 3. **Draw with a real imaging library** (PIL/Pillow), not ASCII art or invented markup:
 
    ```python
    from PIL import Image, ImageDraw
    d = json.load(open(sidecar))            # <capture>.json — self-contained
-   img = Image.open(d["screenshot"])
-   scale = d["alignment"]["coordinate_scale"]
+   img = Image.open(d["screenshot"])       # full-res file; tables map 1:1
    draw = ImageDraw.Draw(img)
    for e in d["entities"]:
-       x, y, w, h = [c * scale for c in e["bounding_box"]]
+       x, y, w, h = e["bounding_box"]
        draw.rectangle([x, y, x + w, y + h], outline="red", width=2)
        draw.text((x, y - 12), f'{e["name"]} (depth {e["depth"]:.1f})', fill="red")
    img.save(capture_path.replace(".png", "-annotated.png"))
    ```
-
 4. **Naming and provenance**: annotate a *copy*, `<name>-annotated.png` beside the original
    — the raw capture is the human-browsable record of what actually rendered, and the
    annotated copy is the illustration. In reports reference the annotated copy and say in the
@@ -545,10 +547,7 @@ from the same tables `game/mouse` clicks in:
    annotate an existing capture without re-deriving anything. Don't call
    `game/entities_on_screen` for this — it projects the *current* frame, not the captured
    one.
-6. **`coordinate_scale: null`** means the scale is unknowable (windowed, uncropped,
-   downscaled capture — the harness doesn't read window state). Fix: re-capture
-   full-resolution, annotate, then downscale.
-7. **What annotations are for**: illustrating a finding, not replacing the data. A report
+6. **What annotations are for**: illustrating a finding, not replacing the data. A report
    cites the exact numbers (`bounding_box`, `depth`, `game/state` values) in prose and uses
    the image as the human-readable pointer. Never encode data *only* in the annotation.
 
