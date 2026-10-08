@@ -44,8 +44,12 @@ Three layers, in one data flow:
    `BevyMcpHarnessPlugin::build`.
 3. **MCP server** (`src/mcp.rs`): rmcp Streamable HTTP, stateless, on `127.0.0.1:15710/mcp`.
    Tools (`client_info`, `game_state`, `ui_tree`, `screenshot`, `keyboard_input`,
-   `gamepad_input`, `mouse_input`, plus host `extra_tools`) proxy to BRP over loopback HTTP via
-   [`BrpClient`].
+   `gamepad_input`, `mouse_input`, `read_guide`, plus host `extra_tools`) proxy to BRP over
+   loopback HTTP via [`BrpClient`]. `read_guide` serves the agent guides bundled into the
+   binary at compile time (`include_str!` of `docs/agents/skills/playtest.md`,
+   `docs/agents/skills/bugreport.md`,
+   `AGENTS.md`, `README.md`) — whole document, one `## ` section by number/title prefix, or an
+   index. A pure-MCP agent can read the playbook from the server itself, zero setup.
 
 `src/lib.rs` owns `BevyMcpHarnessPlugin` + `McpHarnessConfig`; `src/headless.rs` owns the
 render-less/offscreen support machinery. `examples/headless.rs` is the canonical host
@@ -97,8 +101,9 @@ SID=$(curl -si http://127.0.0.1:15710/mcp -X POST -H 'Content-Type: application/
 Verification checklist when touching a surface: `game/client_info` (mode flags), `game/ui`
 (dump lists the example button), `game/keyboard` (`{"key":"KeyW","pressed":true}` then watch the
 example's own log lines flip `KeyW pressed=true`), `game/screenshot` (clean error in no_render;
-PNG + crop + `unchanged:true` suppression when rendered). MCP: `tools/list` shows 8 tools (7
-built-ins + `demo_button`), `tools/call demo_button` round-trips.
+PNG + crop + `unchanged:true` suppression when rendered). MCP: `tools/list` shows 9 tools (8
+built-ins + the example's `demo_button`), `tools/call demo_button` round-trips,
+`tools/call read_guide {"guide":"playtest","section":"6"}` returns the Screenshots section.
 
 Operational notes for agent-driven sessions: run the example as a supervised background process
 and gate on port 15702 listening; **a stale process from a previous run holds the ports** — its

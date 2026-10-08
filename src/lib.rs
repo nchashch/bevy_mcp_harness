@@ -25,7 +25,9 @@
 //! 3. **An in-process MCP server** (`rmcp`, Streamable HTTP on `127.0.0.1:15710`, stateless
 //!    mode) whose tools proxy to the BRP methods over loopback HTTP — the MCP layer owns only
 //!    the protocol surface (tool listing + schemas), never the `World` (the handlers are async
-//!    and run outside Bevy's world; all `World` access stays in BRP's systems).
+//!    and run outside Bevy's world; all `World` access stays in BRP's systems). `read_guide`
+//!    serves the agent guides bundled into the binary at compile time — an agent connected to
+//!    the MCP server can read the playtesting playbook with zero setup.
 //!
 //! **Never enable this in player-facing builds**: it is a debug/QA tool surface and BRP is
 //! unauthenticated by design — localhost bind only.

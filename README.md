@@ -39,7 +39,12 @@ Three layers:
      the resources every frame).
 3. **MCP server** (`rmcp`, Streamable HTTP, stateless) on `127.0.0.1:15710/mcp`: tools
    `client_info`, `game_state`, `ui_tree`, `screenshot`, `keyboard_input`, `gamepad_input`,
-   `mouse_input` — thin proxies to the BRP methods over loopback HTTP.
+   `mouse_input`, `read_guide` — thin proxies to the BRP methods over loopback HTTP.
+   `read_guide` serves the agent guides bundled into the binary
+   (`docs/agents/skills/playtest.md`, `docs/agents/skills/bugreport.md`, `AGENTS.md`,
+   `README.md`) — an agent connected to the MCP server can
+   read the playtesting playbook with zero setup: `read_guide` with no arguments returns the
+   index; `{"guide":"playtest","section":"6"}` returns one section.
 
 Headless support (`McpHarnessConfig::offscreen_size`): every camera is retargeted into a
 shared offscreen texture (with the UI-camera ordering invariant maintained), captures read that

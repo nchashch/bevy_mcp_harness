@@ -7,7 +7,7 @@ was found in — and **retained forever, even after the bug is fixed** (fixed
 reports are marked `Fixed` in place, never deleted). Fixed reports are regression
 armor: they encode the repro, the root cause, and the fix so the same class of
 bug is cheap to recognize the next time. Supplements (does not replace)
-`AGENTS.md` and `skills/playtest.md` (whose harness drives the reproductions).
+`AGENTS.md` and `docs/agents/skills/playtest.md` (whose harness drives the reproductions).
 
 This skill is **generic** — it works for this harness crate itself and for any
 Bevy project that hosts it. prototype_19-specific examples and conventions are
@@ -47,7 +47,7 @@ bug reports go in the agent-facing area only. **[p19]** enforces this as
 
 ## 3. Metadata table (top of every report)
 
-Follow the playtest-report house style (`skills/playtest.md` §9): one H1
+Follow the playtest-report house style (`docs/agents/skills/playtest.md` §9): one H1
 `# Bug 0007 — <one-line summary>`, then a two-column `| Field | Value |` table,
 `##` section headings in the §4 order, fenced code blocks for commands and logs.
 Escape a literal `|` in a table cell as `\|` and a literal `<word>` outside code
@@ -74,7 +74,7 @@ Required fields:
    lines, every harness call with its *actual* JSON payload, waits/sleeps, and
    the observation command that shows the failure. A repro someone cannot paste
    into a shell is not a repro. Prefer the QA harness (`game/state`, `game/ui`,
-   BRP `world.query`) over pixel/screenshot inspection (see `skills/playtest.md`
+   BRP `world.query`) over pixel/screenshot inspection (see `docs/agents/skills/playtest.md`
    §6 — data over pixels), and note which host mode it applies to (render-less
    vs rendered-headless vs windowed — several bugs are mode-specific).
 3. **Expected vs actual** — one line each, concrete (values, positions, log
@@ -93,7 +93,7 @@ Required fields:
 
 ## 5. Best practices (the canons)
 
-- **Reproduce before filing.** Read `skills/playtest.md` and drive the app
+- **Reproduce before filing.** Read `docs/agents/skills/playtest.md` and drive the app
   through the harness; verify the build actually rebuilt (a stale binary
   silently tests old code — this has cost multiple sessions). An unreproducible
   bug is still filed, marked `Not reproduced`, with everything attempted listed —
@@ -112,7 +112,7 @@ Required fields:
   and what the control run showed.
 - **A fix updates four places**: the bug's `Status`/`Fix` section, its row in
   the bug-reports ledger, `AGENTS.md` (the sections that described the buggy
-  behavior), and — if the repro revealed a harness/API gap — `skills/playtest.md`
+  behavior), and — if the repro revealed a harness/API gap — `docs/agents/skills/playtest.md`
   or the harness itself (a custom BRP method / `HarnessTool` on the host, or an
   upgrade here). A bug fix that leaves stale documentation behind is an
   unfinished fix.
@@ -140,7 +140,7 @@ the number never changes.
 
 ## 8. Cross-references
 
-- Playtest reports live beside the bug reports (see `skills/playtest.md` §9);
+- Playtest reports live beside the bug reports (see `docs/agents/skills/playtest.md` §9);
   cite as "playtest NNNN F<finding>".
 - Bugs that produced harness/tooling fixes should name the tool method or tool
   that now covers them — e.g. prototype_19's `game/select` exists because
@@ -181,7 +181,7 @@ repository was extracted from that project's `crates/client/src/dev/tool_api.rs`
   `p19_client::lifecycle/networking`, `dev::tool_api` — exact module paths of
   the code that actually ran.
 - **Repro env details**: `BEVY_ASSET_ROOT` for isolated asset sets
-  (`skills/playtest.md` §12), client modes (`--no-render` vs rendered vs
+  (`docs/agents/skills/playtest.md` §12), client modes (`--no-render` vs rendered vs
   windowed — several p19 bugs were mode-specific), the `dev-tools` cargo
   feature gate for the tool API.
 - **Known open items at extraction time** (documented in p19's AGENTS.md

@@ -781,7 +781,7 @@ Each instance generates a fresh nanosecond netcode client-id — no collision.
   committing). Raw capture staging: `docs/agents/playtests/dist/screenshots/`
   (gitignored, never committed).
 - Bug reports: `docs/agents/bug_reports/bug_XXXX.md` + ledger in its
-  `README.md` (see `skills/bugreport.md`).
+  `README.md` (see `docs/agents/skills/bugreport.md`).
 - Skills: `docs/agents/skills/{playtest,bugreport}.md`; decisions:
   `docs/agents/adr/` (0009 tool API, 0011 vision/fleet, 0012 no-render,
   0015 bevy_markup, 0017 client-owned look).

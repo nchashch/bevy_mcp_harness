@@ -10,7 +10,118 @@ use rmcp::model::{CallToolResult, ContentBlock, ErrorData, ServerConfig, Tool};
 use serde_json::json;
 use std::sync::Arc;
 
-/// A loopback HTTP client to this app's BRP surface — the handle handed to every
+// The agent-facing guides, compiled into the binary (include_str = compile-time, so they ship
+// with `cargo add bevy_mcp_harness` and are readable from the MCP server with zero setup — no
+// repo checkout, no CWD assumptions). Paths are relative to this source file.
+const PLAYTEST_GUIDE: &str = include_str!("../docs/agents/skills/playtest.md");
+const BUGREPORT_GUIDE: &str = include_str!("../docs/agents/skills/bugreport.md");
+const AGENTS_DOC: &str = include_str!("../AGENTS.md");
+const README_DOC: &str = include_str!("../README.md");
+
+/// (name, document) pairs served by the `read_guide` tool.
+const GUIDES: &[(&str, &str)] = &[
+    ("playtest", PLAYTEST_GUIDE),
+    ("bugreport", BUGREPORT_GUIDE),
+    ("agents", AGENTS_DOC),
+    ("readme", README_DOC),
+];
+
+/// The `read_guide` tool's parameters.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ReadGuideParams {
+    /// Which guide to read: `playtest` (the headless playtesting playbook), `bugreport` (the
+    /// bug-reporting skill), `agents` (AGENTS.md — harness architecture, invariants, gotchas),
+    /// or `readme` (README.md — usage). Omit (or pass `list`) to get an index of the guides
+    /// with their section headings.
+    pub guide: Option<String>,
+    /// Optional: read only one `## ` section of the guide, matched by number or title prefix
+    /// (e.g. `"6"` → "6. Screenshots", `"4b"`, `"reporting"`, `"prototype_19"`). First match
+    /// wins; omit for the whole document.
+    pub section: Option<String>,
+}
+
+/// Splits a Markdown document into `(title, body)` chunks at `## ` headings (one per `##`
+/// section, `###` subsections included in their parent).
+fn markdown_sections(doc: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut current: Option<(String, usize)> = None;
+    let line_count = doc.lines().count();
+    for (idx, line) in doc.lines().enumerate() {
+        if let Some(title) = line.strip_prefix("## ").map(str::trim) {
+            if let Some((started, start)) = current.take() {
+                out.push((started, doc_lines_range(doc, start, idx)));
+            }
+            current = Some((title.to_owned(), idx));
+        }
+    }
+    if let Some((started, start)) = current {
+        out.push((started, doc_lines_range(doc, start, line_count)));
+    }
+    out
+}
+
+/// `doc.lines()`-based `[start, end)` slice (end exclusive), joined back with newlines.
+fn doc_lines_range(doc: &str, start: usize, end: usize) -> String {
+    doc.lines()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `read_guide` tool's body — shared by the whole-document, section, and index paths.
+fn read_guide_body(guide: Option<String>, section: Option<String>) -> Result<String, ErrorData> {
+    match guide.as_deref().map(str::trim) {
+        None | Some("") | Some("list") => {
+            let mut index = String::from("# Bundled guides\n\nRead with read_guide(guide, [section]).\n");
+            for (name, doc) in GUIDES {
+                index.push_str(&format!("\n## `{name}` — {} bytes\n", doc.len()));
+                for (title, _) in markdown_sections(doc) {
+                    index.push_str(&format!("- {title}\n"));
+                }
+            }
+            Ok(index)
+        }
+        Some(name) => {
+            let Some((_, doc)) = GUIDES.iter().find(|(n, _)| *n == name) else {
+                let names: Vec<&str> = GUIDES.iter().map(|(n, _)| *n).collect();
+                return Err(ErrorData::invalid_params(
+                    format!("unknown guide {name:?} — available: {}", names.join(", ")),
+                    None,
+                ));
+            };
+            let Some(query) = section.as_deref().map(str::trim).filter(|q| !q.is_empty()) else {
+                return Ok((*doc).to_owned());
+            };
+            let q = query.to_lowercase();
+            let sections = markdown_sections(doc);
+            let found = sections.iter().find(|(title, _)| {
+                let title = title.to_lowercase();
+                let unnumbered = title
+                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ')
+                    .trim()
+                    .to_lowercase();
+                title.starts_with(&q) || unnumbered.starts_with(&q)
+            });
+            match found {
+                Some((_, body)) => Ok((*body).to_owned()),
+                None => {
+                    let titles: Vec<&str> =
+                        sections.iter().map(|(title, _)| title.as_str()).collect();
+                    Err(ErrorData::invalid_params(
+                        format!(
+                            "no section matching {query:?} in {name:?} — sections: {}",
+                            titles.join(" | ")
+                        ),
+                        None,
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// A loopback HTTP client to the app's BRP surface — the handle handed to every
 /// [`HarnessTool`] callback. Custom tools drive the app the same way the built-in ones do:
 /// JSON-RPC methods over `127.0.0.1:<brp_port>` (built-ins like `bevy/query` work, and so do
 /// custom methods the host registered — see the crate docs' "Extending" section).
@@ -357,6 +468,19 @@ impl GameTools {
     async fn client_info(&self) -> Result<CallToolResult, ErrorData> {
         let result = self.brp("game/client_info", json!({})).await?;
         Self::text_result(result).await
+    }
+
+    /// Serves the agent guides bundled into the harness binary at compile time: the headless
+    /// playtesting playbook, the bug-reporting skill, AGENTS.md, and the README. Available with
+    /// zero setup — no repo checkout needed; paths mentioned inside the guides refer to the
+    /// harness repository.
+    #[rmcp::tool(description = "Read the agent guides bundled with this MCP server: `playtest` (the headless playtesting playbook: launch recipes, input mocking, screenshots, failure modes), `bugreport` (bug-reporting skill), `agents` (harness architecture + invariants), `readme` (usage). Call with no arguments first for an index of guides and their sections; then read the whole guide or one section by number/title prefix (e.g. section \"6\" = Screenshots, \"12\" = prototype_19 specifics, \"reporting\"). Read the playtest guide BEFORE driving the app headlessly.")]
+    async fn read_guide(
+        &self,
+        Parameters(ReadGuideParams { guide, section }): Parameters<ReadGuideParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let text = read_guide_body(guide, section)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     /// Dumps the UI tree: labeled rects + text for every visible UI node, in screenshot pixel
