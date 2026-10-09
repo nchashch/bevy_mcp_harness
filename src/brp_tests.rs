@@ -239,7 +239,7 @@ fn parse_crop_rejects_malformed_input() {
 // ---------------------------------------------------------------------------
 
 /// A 4x2 PNG of distinct per-pixel colors (deterministic content for crop assertions).
-fn tiny_png(width: u32, height: u32) -> Vec<u8> {
+pub(crate) fn tiny_png(width: u32, height: u32) -> Vec<u8> {
     let mut img = image::RgbaImage::new(width, height);
     for y in 0..height {
         for x in 0..width {
@@ -488,7 +488,7 @@ fn next_test_ports() -> (u16, u16) {
 /// The render-less composition from `examples/headless.rs` (UI layout and picking are
 /// render-free logic): booted here so tests exercise the REAL dump path — `UiStack`,
 /// `ComputedNode`, the bootstrap UI camera, the shim — not a mock world.
-fn no_render_app() -> App {
+pub(crate) fn no_render_app() -> App {
     let (brp_port, mcp_port) = next_test_ports();
     let mut app = App::new();
     app.add_plugins((

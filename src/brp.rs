@@ -8,6 +8,10 @@
 #[path = "brp_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "brp_proptests.rs"]
+mod proptests;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

@@ -71,3 +71,4 @@ bevy_dev_tools = { version = "0.20", optional = true }
 # — dev-dependency features only affect examples/tests, never host builds of the lib.
 [dev-dependencies]
 bevy = { version = "0.20" }
+proptest = "1"

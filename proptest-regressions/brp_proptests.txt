@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 512908b13496db47f92a1360f821b2a9303edbfed5f0095234aa6d074f621c69 # shrinks to tree = PNode { clickable: false, pressed: false, hovered: true, children: [] }
+cc e0fdef5f943ac33f163e059c816841b8ae9a0743751bd1a5dab38d4c40f56971 # shrinks to tree = PNode { clickable: false, pressed: false, hovered: false, children: [PNode { clickable: false, pressed: false, hovered: false, children: [] }, PNode { clickable: false, pressed: false, hovered: true, children: [] }] }
