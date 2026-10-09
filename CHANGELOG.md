@@ -9,7 +9,7 @@ Before 1.0, a minor version bump (0.2 → 0.3) may contain breaking changes.
 The design history behind these changes lives in
 [`docs/agents/adr/`](docs/agents/adr/README.md).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-09
 
 ### Changed
 
@@ -34,6 +34,44 @@ The design history behind these changes lives in
     documented extension point, since the harness's default `clickable` convention (legacy
     `Interaction`) is unchanged and `bevy_ui::Interaction` remains deprecated-but-maintained
     in 0.20 (bevy's own `Button` still requires it). Legacy-UI hosts see no behavior change.
+
+### Added
+
+- **Test suite** — 34 unit/scene tests + 3 property tests (`proptest`
+  dev-dependency), targeting the code where the real bugs lived:
+  - **Tier 1 (pure functions)**: the hand-maintained name tables written as
+    exhaustive-variant matches (a bevy rename/addition of `GamepadButton`/
+    `GamepadAxis`/`MouseButton`/`RenderDebugMode` fails to *compile*, forcing
+    the parse-table update instead of a silently-unreachable mock);
+    `parse_crop`'s boundary contract; `encode_served_view`'s crop/downscale
+    math against synthetic PNGs; the alignment block's IHDR parse and
+    unknowable-scale null; `UiFilter` semantics; the unchanged-suppression
+    hash's determinism and sensitivity.
+  - **Tier 2 (`no_render` test scenes)**: the render-less composition booted
+    for real (UI layout and picking are render-free logic) — a boot canary
+    that would have caught the 0.20 `InputFocus` panic and the
+    `ButtonPlugin` double-add before the example did; the
+    `Interaction`/`Hovered`/`Pressed` projection asserted over constructed
+    trees and component states; the `clickable` hook; unchanged-suppression
+    behavior; and the `entities_on_screen` projection against hand-set
+    `Camera.computed` values (the same public fields the render app writes).
+  - **Property tests**: `parse_crop` (512 cases, LLM-plausible numeric
+    domain — clean reject or four rounded counts), `encode_served_view`
+    (256 cases — dims follow the crop-then-fit formula exactly, output
+    decodes, crop pixels are pixel-identical to the clamped sub-rect), and
+    the interaction fold (64 cases — random UI trees with random states;
+    clickable rows read the strongest state of their first-clickable-ancestor
+    group, covered rows fold, uncovered rows keep hover). Shrunk failures
+    persist to `proptest-regressions/` and re-run on every test invocation.
+
+### Fixed
+
+- **`entities_on_screen` depth was camera-distance to the LOCAL AABB
+  center** — every origin-centered mesh read as camera-to-world-origin
+  (measured live: 141.48 for the level camera, 0.0 for the spawn cameras),
+  breaking the nearest-first sort. Depth is now the distance to the world
+  center. Caught by the projection tests; p19 (the 0.3.1/bevy-0.19 line)
+  gets this at its bevy-0.20 migration.
 
 ## [0.3.1] - 2026-10-09
 
@@ -278,7 +316,8 @@ already folded in.
   and hides the tools that are meaningless without a world render/window),
   and `pub use schemars; pub use serde_json;` re-exports.
 
-[Unreleased]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/nchashch/bevy_mcp_harness/compare/v0.2.0...v0.2.1
