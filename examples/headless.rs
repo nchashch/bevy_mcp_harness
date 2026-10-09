@@ -66,6 +66,12 @@ fn main() {
             bevy::asset::AssetPlugin::default(),
             bevy::text::TextPlugin,
             bevy::ui::UiPlugin,
+            // The widget-button observers (`ui_widgets::Button` activates on press/click);
+            // in the --render branch `DefaultPlugins` provides this group instead.
+            bevy::ui_widgets::UiWidgetsPlugins,
+            // The widgets' text-input systems read `InputFocus` — the resource comes from
+            // this plugin (part of `DefaultPlugins` in the --render branch).
+            bevy::input_focus::InputFocusPlugin,
             bevy::input::InputPlugin,
             // Picking core: PointerInputPlugin spawns the mouse pointer entity and consumes the
             // harness's mocked `PointerInput` events; InteractionPlugin maintains the hover map.
@@ -86,9 +92,17 @@ fn main() {
             // Game-specific MCP tool served alongside the harness's built-ins (see
             // `register_game_methods` below for the BRP method it proxies to).
             extra_tools: vec![describe_button_tool()],
+            // `game/ui`'s `clickable` convention is pluggable (the default reads the legacy
+            // `bevy_ui::Interaction`); this app uses bevy 0.20's widget button, so teach the
+            // dump about it here. Hosts on their own widget systems do the same.
+            clickable: Some(std::sync::Arc::new(|world, entity| {
+                world.get::<bevy::ui_widgets::Button>(entity).is_some()
+            })),
             ..McpHarnessConfig::from_env()
         },
     })
+    // `bevy::ui_widgets::UiWidgetsPlugins` (the widget-button observers) is part of
+    // `DefaultPlugins` already — nothing to add here.
     .add_systems(Startup, spawn_ui)
     .add_systems(Update, (observe_mocked_input, exit_after_warmup));
     // Custom BRP methods attach any time after the harness plugin: the system is registered
@@ -127,18 +141,26 @@ fn register_game_methods(app: &mut App) {
 /// from the MCP thread; this is why the tool layer proxies over BRP).
 fn demo_button_method(_params: In<Option<serde_json::Value>>, world: &mut World) -> bevy::remote::BrpResult {
     use bevy::remote::BrpError;
-    let Ok((entity, node, transform, interaction)) = world
+    let Ok((entity, node, transform, hovered, pressed)) = world
         .query_filtered::<(
             Entity,
             &ComputedNode,
             &UiGlobalTransform,
-            Option<&Interaction>,
+            Option<&bevy::picking::hover::Hovered>,
+            Option<&bevy::ui::Pressed>,
         ), With<DemoButton>>()
         .single(world)
     else {
         return Err(BrpError::internal("demo button not found (not laid out yet?)"));
     };
     let (_, _, translation) = transform.to_scale_angle_translation();
+    let interaction = if pressed.is_some() {
+        "Pressed"
+    } else if hovered.is_some_and(|hovered| hovered.get()) {
+        "Hovered"
+    } else {
+        "Idle"
+    };
     Ok(serde_json::json!({
         "entity": entity,
         "rect": [
@@ -147,7 +169,7 @@ fn demo_button_method(_params: In<Option<serde_json::Value>>, world: &mut World)
             node.size().x.round() as i32,
             node.size().y.round() as i32,
         ],
-        "interaction": interaction.copied().map(|interaction| format!("{interaction:?}")),
+        "interaction": interaction,
     }))
 }
 
@@ -176,10 +198,12 @@ fn describe_button_tool() -> HarnessTool {
 
 fn spawn_ui(mut commands: Commands) {
     // The harness's bootstrap UI camera exists already (headless mode); all we add is one
-    // interactive button for `game/ui` to dump and the mocked pointer to hover/click.
+    // interactive button for `game/ui` to dump and the mocked pointer to hover/click. Bevy
+    // 0.20's widget button (`ui_widgets::Button` + `ButtonPlugin` observers, added above) —
+    // the deprecated `bevy_ui::Button`/`Interaction` pair can't be constructed anymore.
     commands.spawn((
         DemoButton,
-        Button,
+        bevy::ui_widgets::Button,
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(560.0),
@@ -206,13 +230,27 @@ fn observe_mocked_input(
     frame: Res<FrameCount>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    button: Query<&Interaction, With<DemoButton>>,
+    button: Query<
+        (
+            Option<&bevy::picking::hover::Hovered>,
+            Option<&bevy::ui::Pressed>,
+        ),
+        With<DemoButton>,
+    >,
     hover: Option<Res<bevy::picking::hover::HoverMap>>,
 ) {
     if !frame.0.is_multiple_of(120) {
         return;
     }
-    let interaction = button.iter().next().copied();
+    let interaction = button.iter().next().map(|(hovered, pressed)| {
+        if pressed.is_some() {
+            "Pressed"
+        } else if hovered.is_some_and(|hovered| hovered.get()) {
+            "Hovered"
+        } else {
+            "Idle"
+        }
+    });
     let hover_entries = hover.as_ref().map(|map| map.0.len()).unwrap_or(0);
     info!(
         "frame {}: KeyW pressed={}, Left pressed={}, button interaction={interaction:?}, hover entries={hover_entries}",

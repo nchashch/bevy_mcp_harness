@@ -1,6 +1,6 @@
 [package]
 name = "bevy_mcp_harness"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "Localhost MCP + BRP tool surface for agent-driven QA playtesting of Bevy apps"
 license = "MIT OR Apache-2.0"
@@ -25,12 +25,15 @@ render_debug = [
     "bevy/bevy_core_pipeline",
     "bevy/bevy_pbr",
 ]
-physics_debug = ["dep:avian3d", "bevy/bevy_gizmos"]
+# Physics debug views (`physics_debug`): NOT on this line. avian3d 0.7 — the newest release —
+# requires bevy ^0.19, so no avian3d release can compile against bevy 0.20 and the feature is
+# removed until avian3d updates (the `physics` debug_view then errors cleanly instead of
+# pulling an incompatible dependency graph).
 
 [dependencies]
 # `bevy_remote` is the BRP data layer; `serialize` lets `game/keyboard` deserialize `KeyCode`
 # variants by name through KeyCode's own serde impl.
-bevy = { version = "0.19.1", default-features = false, features = [
+bevy = { version = "0.20", default-features = false, features = [
     "bevy_camera",
     "bevy_log",
     "bevy_mesh",
@@ -62,13 +65,9 @@ serde = "1"
 schemars = "1.0"
 # Render-debug views (`render_debug` feature): `bevy_dev_tools`' overlay reads prepass/gbuffer
 # textures, so it needs the render-pipeline crates — none of which pull winit/wayland.
-bevy_dev_tools = { version = "0.19.1", optional = true }
-# Physics debug views (`physics_debug` feature): Avian3D's collider gizmos, rendered via
-# bevy_gizmos as part of the normal render pipeline. The version must match the host's
-# avian3d dependency.
-avian3d = { version = "0.7", optional = true }
+bevy_dev_tools = { version = "0.20", optional = true }
 
 # Examples build against the full bevy feature set (the `--render` branch uses `DefaultPlugins`)
 # — dev-dependency features only affect examples/tests, never host builds of the lib.
 [dev-dependencies]
-bevy = { version = "0.19.1" }
+bevy = { version = "0.20" }

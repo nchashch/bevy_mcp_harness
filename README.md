@@ -16,6 +16,7 @@ terms as Bevy itself.
 
 | bevy_mcp_harness | bevy |
 |---|---|
+| 0.4 | 0.20 |
 | 0.3 | 0.19.1 |
 | 0.2 | 0.19.1 |
 | 0.1 | 0.19.1 |
@@ -45,8 +46,9 @@ Three layers:
      always the full-resolution, uncropped frame. Pixel-identical polls answer `unchanged:
      true` without re-sending the image. With the `render_debug` feature, a `debug_view` param
      renders rendering internals into the capture (`depth`, `normals`, `motion_vectors`,
-     `deferred*`, `depth_pyramid`, `wireframe`; `physics` collider gizmos under
-     `physics_debug` — see [ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)).
+     `deferred*`, `depth_pyramid`, `wireframe`; the `physics` collider-gizmo view needs
+     `avian3d` and returns a clean error on this line until avian3d supports bevy 0.20 —
+     see [ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)).
      Every screenshot response embeds an `entities` table: visible `Aabb` entities projected
      into screenshot pixel space (`{entity, name, center, bounding_box, depth}`,
      nearest-first) — see
@@ -106,7 +108,11 @@ All off by default — hosts opt into what they need:
 | Feature | Pulls | Enables |
 |---|---|---|
 | `render_debug` | `bevy_dev_tools`, `bevy_core_pipeline`, `bevy_pbr` | the `debug_view` / `debug_views` overlay modes and `wireframe` ([ADR 0009](docs/agents/adr/0009-render-debug-views-on-screenshots.md)) |
-| `physics_debug` | `avian3d`, `bevy_gizmos` | the `physics` debug view (Avian3D collider gizmos) |
+
+The `physics_debug` feature (the `physics` Avian3D collider-gizmo view) is **absent on this
+bevy line**: the newest avian3d release requires bevy 0.19, so no avian3d version can compile
+against bevy 0.20 — `debug_view: "physics"` returns a clean error instead. The feature
+returns when avian3d updates.
 
 The base dependency is `bevy` with `default-features = false` and only the features this
 crate's code touches — hosts whose Bevy is minimal (headless dedicated servers) don't inherit

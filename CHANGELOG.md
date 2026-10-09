@@ -9,6 +9,32 @@ Before 1.0, a minor version bump (0.2 → 0.3) may contain breaking changes.
 The design history behind these changes lives in
 [`docs/agents/adr/`](docs/agents/adr/README.md).
 
+## [Unreleased]
+
+### Changed
+
+- **Bevy 0.20** (the 0.4 line; the 0.3 line stays on bevy 0.19.1). The minimal-Bevy
+  feature list is unchanged (all nine features exist in 0.20); `bevy_dev_tools` bumps with
+  it. Host-facing behavior changes:
+  - **`physics_debug` is absent on this line.** The newest avian3d (0.7) requires
+    bevy `^0.19`, so no avian3d release compiles against bevy 0.20 — keeping the feature
+    would break every `--all-features` build. `debug_view: "physics"` now returns a clean
+    error instead of silently producing a plain capture (the previous no-feature fallback,
+    a latent bug this exposed). The feature returns when avian3d updates.
+  - **`game/ui` reads bevy 0.20's widget state**: the dump now also reads
+    `bevy_ui::Pressed` and marks hover from the **hover map** (bevy 0.20's `Hovered`
+    component is opt-in — only maintained on entities that already carry it, so it never
+    appears on a widget button). A hovered/pressed state on a label child propagates up to
+    the kept interactive ancestor (the fold), matching the legacy `Interaction` semantics:
+    a hovered widget button reads `Hovered`, not `Idle`. Verified live end-to-end: Idle →
+    Hovered → Pressed → Hovered on the example's widget button.
+  - The example migrates to the `ui_widgets::Button` widget (`ButtonPlugin` observers +
+    `InputFocusPlugin` in the render-less composition — `DefaultPlugins` provides both in
+    the rendered branch) and registers a `clickable` hook for the new widget — the
+    documented extension point, since the harness's default `clickable` convention (legacy
+    `Interaction`) is unchanged and `bevy_ui::Interaction` remains deprecated-but-maintained
+    in 0.20 (bevy's own `Button` still requires it). Legacy-UI hosts see no behavior change.
+
 ## [0.3.1] - 2026-10-09
 
 ### Changed

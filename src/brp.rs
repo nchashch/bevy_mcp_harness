@@ -460,10 +460,10 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .map(|target| Screenshot(bevy::camera::RenderTarget::Image(target.0.clone().into())))
         .unwrap_or_else(Screenshot::primary_window);
 
-    // `debug_view: "physics"` is a persistent toggle — Avian3D collider gizmos via
-    // bevy_gizmos. The gizmos stay on for subsequent captures (a logical view, not a
-    // one-shot visual overlay). Requires the `physics_debug` cargo feature.
-    #[cfg(feature = "physics_debug")]
+    // `debug_view: "physics"` (Avian3D collider gizmos) needs the `physics_debug` cargo
+    // feature, which this line does not ship: the newest avian3d release requires bevy 0.19,
+    // so no avian3d version can compile against bevy 0.20 — the feature returns when
+    // avian3d updates. A plain capture would be a silent lie; error instead.
     if params
         .0
         .as_ref()
@@ -471,20 +471,10 @@ pub(crate) fn screenshot_start_method(params: In<Option<serde_json::Value>>, wor
         .and_then(serde_json::Value::as_str)
         == Some("physics")
     {
-        physics_debug::apply_physics_debug(world)?;
-        world
-            .spawn(capture_target)
-            .observe(save_encoded_to_disk(path.clone()))
-            .observe(restore_camera_order);
-        return Ok(json!({
-            "status": "capturing",
-            "poll": "game/screenshot/get",
-            "path": path.display().to_string(),
-            "crop": crop,
-            "max_dimension": max_dimension,
-            "debug_view": "physics",
-            "note": "physics collider gizmos enabled — they stay on for subsequent captures",
-        }));
+        return Err(BrpError::internal(
+            "debug_view \"physics\" requires the physics_debug cargo feature, which is \
+             unavailable on this bevy line (avian3d has no bevy-0.20-compatible release yet)",
+        ));
     }
 
     // `debug_view: "wireframe"` is a separate mechanism (global `WireframeConfig` toggle in
@@ -1398,34 +1388,6 @@ pub(crate) mod render_debug {
 }
 
 // ---------------------------------------------------------------------------
-// Physics debug views — Avian3D collider gizmos via bevy_gizmos. The gizmos are drawn by
-// systems that run every frame in PostUpdate (gated by `PhysicsGizmos.enabled`), so once
-// enabled they appear in every subsequent capture without a warm-up race.
-#[cfg(feature = "physics_debug")]
-mod physics_debug {
-    use super::*;
-    
-
-    /// Ensures the `PhysicsDebugPlugin` is added and the `PhysicsGizmos` config has
-    /// collider rendering enabled. The gizmos are persistent — they stay on for subsequent
-    /// captures until explicitly disabled or the app exits. Returns the collider color used.
-    pub(crate) fn apply_physics_debug(world: &mut World) -> Result<Color, BrpError> {
-        let collider_color = Color::srgb(0.0, 1.0, 0.5);
-        // Toggle the PhysicsGizmos config group through GizmoConfigStore — the plugin's
-        // PostUpdate systems check `enabled` and `collider_color` to decide what to draw.
-        {
-            let mut store = world.resource_mut::<bevy::gizmos::config::GizmoConfigStore>();
-            let (gizmo_config, physics_config) =
-                store.config_mut::<avian3d::debug_render::PhysicsGizmos>();
-            gizmo_config.enabled = true;
-            physics_config.collider_color = Some(collider_color);
-            physics_config.aabb_color = Some(Color::srgba(1.0, 1.0, 0.0, 0.3));
-        }
-        Ok(collider_color)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Agent vision aids — everything here exists so a vision model reads LESS
 // off the pixels: `game/ui` gives labeled rects + text instead of OCR, and
 // the agent cursor makes the mocked pointer's position/hover observable.
@@ -1658,6 +1620,11 @@ pub(crate) fn update_agent_cursor(
 
 /// The [`ui_dump_method`] payload. See that function's doc comment for the semantics and the
 /// read filters.
+// `bevy_ui::Interaction` is deprecated in bevy 0.20 (→ `picking::hover::Hovered` + `ui::Pressed`),
+// but it is still maintained (`ui_focus_system`) and still what bevy's own `Button` requires — and
+// it is the documented source of the dump's `interaction` field. The dump already reads the new
+// `Hovered` too; the full widgets migration is a separate change with its own verification.
+#[expect(deprecated)]
 fn ui_dump_snapshot(world: &mut World, filter: &UiFilter) -> serde_json::Value {
     let offscreen = world
         .get_resource::<CaptureTarget>()
@@ -1721,6 +1688,7 @@ fn ui_dump_snapshot(world: &mut World, filter: &UiFilter) -> serde_json::Value {
         &ComputedUiTargetCamera,
         Option<&InheritedVisibility>,
         Option<&bevy::ui::Interaction>,
+        Option<&bevy::ui::Pressed>,
         Option<&PickHovered>,
     ), (
         Without<AgentCursorRoot>,
@@ -1745,7 +1713,7 @@ fn ui_dump_snapshot(world: &mut World, filter: &UiFilter) -> serde_json::Value {
     }
     let mut rows = Vec::new();
     for &entity in &stack {
-        let Ok((node, transform, target, visibility, interaction, hovered)) =
+        let Ok((node, transform, target, visibility, interaction, pressed, hovered)) =
             nodes.get(world, entity)
         else {
             continue;
@@ -1770,7 +1738,9 @@ fn ui_dump_snapshot(world: &mut World, filter: &UiFilter) -> serde_json::Value {
             continue;
         }
         let clickable = interaction.is_some() || extra_clickable.contains(&entity);
-        let interaction = if matches!(interaction, Some(bevy::ui::Interaction::Pressed)) {
+        let interaction = if matches!(interaction, Some(bevy::ui::Interaction::Pressed))
+            || pressed.is_some()
+        {
             Some("Pressed".to_owned())
         } else if matches!(interaction, Some(bevy::ui::Interaction::Hovered))
             || hovered.is_some_and(|hovered| hovered.0)
@@ -1814,6 +1784,68 @@ fn ui_dump_snapshot(world: &mut World, filter: &UiFilter) -> serde_json::Value {
         .filter(|row| row.clickable)
         .map(|row| row.entity)
         .collect();
+    // Interaction propagates up the fold: picking hovers the TOPMOST node — often a label
+    // child — while the interactive ancestor is the row the dump keeps. Under the legacy
+    // `Interaction` the focus system set the blocking ancestor, so the kept row showed the
+    // state; with the bevy-0.20 widget components (`Hovered`/`Pressed` land on whatever the
+    // pick hit), the kept row must inherit the strongest descendant state or a hovered button
+    // reads `Idle`. Pressed beats Hovered beats Idle.
+    let rank = |interaction: &Option<String>| match interaction.as_deref() {
+        Some("Pressed") => 2,
+        Some("Hovered") => 1,
+        _ => 0,
+    };
+    // The authoritative hover source: the hover map itself. bevy 0.20's `Hovered` component is
+    // opt-in (only maintained on entities that already carry it — nothing inserts it on
+    // hover), so the dump marks every row on the hovered entity's ancestor chain as Hovered.
+    {
+        let row_by_entity: HashMap<Entity, usize> = rows
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| (row.entity, idx))
+            .collect();
+        for &hovered_entity in &hovered_entities {
+            let mut current = hovered_entity;
+            for _ in 0..16 {
+                if let Some(&idx) = row_by_entity.get(&current)
+                    && rank(&rows[idx].interaction) < 1
+                {
+                    rows[idx].interaction = Some("Hovered".to_owned());
+                }
+                let Ok(parent) = parents.get(world, current) else {
+                    break;
+                };
+                current = parent.0;
+            }
+        }
+    }
+    let mut upgrades: HashMap<Entity, Option<String>> = HashMap::new();
+    for row in rows.iter().filter(|row| !row.clickable && row.interaction.is_some()) {
+        let mut current = row.entity;
+        let mut strength = rank(&row.interaction);
+        for _ in 0..16 {
+            let Ok(parent) = parents.get(world, current) else {
+                break;
+            };
+            current = parent.0;
+            if clickable.contains(&current) {
+                let entry = upgrades.entry(current).or_insert_with(|| row.interaction.clone());
+                if rank(entry) < strength {
+                    *entry = row.interaction.clone();
+                }
+                break;
+            }
+            // Nested non-interactive layers don't dilute; keep walking with the same strength.
+            strength = strength.max(rank(&upgrades.get(&current).cloned().flatten()));
+        }
+    }
+    for row in rows.iter_mut() {
+        if let Some(upgrade) = upgrades.get(&row.entity)
+            && rank(upgrade) > rank(&row.interaction)
+        {
+            row.interaction = upgrade.clone();
+        }
+    }
     let mut covered_by_ancestor = |entity: Entity| -> bool {
         let mut current = entity;
         for _ in 0..16 {
