@@ -163,6 +163,9 @@ fn mouse_button_table_matches_documented_names() {
     );
 }
 
+// Feature-gated: CI's `cargo build --all-targets` runs WITHOUT --all-features, and the
+// render_debug module (plus bevy_dev_tools) doesn't exist there.
+#[cfg(feature = "render_debug")]
 #[test]
 fn render_debug_mode_table_round_trips_every_mode() {
     use super::render_debug;

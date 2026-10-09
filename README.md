@@ -118,6 +118,13 @@ The base dependency is `bevy` with `default-features = false` and only the featu
 crate's code touches — hosts whose Bevy is minimal (headless dedicated servers) don't inherit
 `bevy_winit`/Wayland system deps. Hosts enable the rest of Bevy's features themselves.
 
+One bevy-0.20 caveat this crate can't move: **bevy_remote 0.20 unconditionally depends on
+`bevy_dev_tools`, which unconditionally depends on `bevy_audio` → cpal → alsa-sys** — so
+compiling *any* bevy-0.20 app that uses bevy_remote (this crate's BRP layer included) needs
+ALSA headers on Linux (`libasound2-dev` on Debian/Ubuntu). That is bevy-internal, applies to
+every bevy_remote host, and is unrelated to this crate's feature list; runtime audio is not
+initialized (the harness never touches `bevy_audio`).
+
 ## Usage
 
 ```toml

@@ -14,14 +14,24 @@ env:
 
 jobs:
   # The crate's own boundary check: the lib must compile and test against the minimal Bevy
-  # feature set (see Cargo.toml — `default-features = false`) with NO system libraries
-  # installed. A host embedding the harness into a headless server must not inherit
+  # feature set (see Cargo.toml — `default-features = false`) without winit/Wayland system
+  # libraries. A host embedding the harness into a headless server must not inherit
   # winit/Wayland; this job fails the moment a feature creeps back into the default set.
+  # (Bevy 0.20 caveat: `bevy_remote` unconditionally depends on `bevy_dev_tools`, which
+  # unconditionally depends on `bevy_audio` → cpal → alsa-sys — so ALSA *headers* are
+  # required to compile ANY bevy-0.20 app using bevy_remote, this crate included. That is
+  # bevy-internal, applies to every bevy_remote host, and is NOT a boundary this crate can
+  # move; the guard therefore still only polices winit/Wayland.)
   lib:
-    name: Lib (minimal Bevy, no system deps)
+    name: Lib (minimal Bevy, no winit/Wayland)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install ALSA headers (bevy 0.20's bevy_remote → bevy_dev_tools → bevy_audio)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
