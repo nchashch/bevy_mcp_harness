@@ -4,6 +4,10 @@
 //! game-specific methods (`game/input` action mocks, `game/select`, `game/trigger`,
 //! `game/levels`, `game/select_level` — all bound to that prototype's own crates).
 
+#[cfg(test)]
+#[path = "brp_tests.rs"]
+mod tests;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -816,10 +820,10 @@ pub(crate) fn entities_on_screen_data(
             continue;
         }
 
-        // Depth: distance from camera to the AABB center.
-        let distance = camera_transform
-            .translation()
-            .distance(Vec3::from(aabb.center));
+        // Depth: distance from camera to the AABB's WORLD-space center. (The local `aabb.center`
+        // would report the camera's distance to the origin for any entity whose mesh is
+        // centered at its own origin — breaking the nearest-first sort for translated entities.)
+        let distance = camera_transform.translation().distance(world_center);
 
         let mut entry = json!({
             "entity": entity,
